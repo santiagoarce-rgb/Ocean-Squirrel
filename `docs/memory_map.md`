@@ -1,0 +1,12 @@
+```markdown
+# PSP Memory Map & Relocation Notes
+
+## Base Configuration
+- **Executable Format:** PSP `EBOOT.BIN` / `EBOOT.ELF`
+- **Default Load Address:** `0x00000000` (Requiere reubicación)
+- **Rebased Image Address:** `0x08804000` (o `0x08800000`)
+
+## PSP RAM Layout (Standard User Space)
+- `0x08800000 - 0x08803FFF`: Reservado / Kernel / PSP SDK Header
+- `0x08804000 - ...`: Sección `.text` (Código ejecutable del juego)
+- Global variables and BSS mapped within standard user RAM range (`0x08800000 - 0x0A000000`).
