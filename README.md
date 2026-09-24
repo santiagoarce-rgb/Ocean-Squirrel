@@ -2,6 +2,11 @@
 
 Proyecto de análisis estático, descompilación y documentación del motor de *SpongeBob SquarePants: Truth or Square* (PSP) utilizando **Ghidra** y **DeepSeek LLM** via **GhidrAssist**.
 
+Legal Disclaimer
+This repository does NOT contain any copyrighted assets, game ROMs, or original binaries from SpongeBob SquarePants: Truth or Square.
+
+This project is strictly for educational, research, and reverse-engineering purposes to document the inner mechanics of the game engine. All code in this repository is reconstructed via static analysis. All trademarks belong to their respective owners (Nickelodeon / Paramount / THQ Wireless / Heavy Iron Studios).
+
 ##  Entorno y Configuración
 - **Descompilador:** Ghidra 12.1 (CachyOS / Arch Linux)
 - **Plugin:** GhidrAssist v12.1
@@ -29,3 +34,4 @@ typedef struct StreamObject {
     uint8_t padding[376];      // Offset 0x04 - 0x17B: Datos internos
     uint32_t dest_buffer[29];  // Offset 0x17C (0x5f * 4): Buffer de entrada (116 bytes)
 } StreamObject;
+
