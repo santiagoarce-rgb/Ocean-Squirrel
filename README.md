@@ -1,4 +1,3 @@
-Here is your updated `README.md` formatted in English, reflecting the pivot from manual PSP decompilation to the Wii static recompilation project using **NWiiRecomp**:
 
 ---
 
