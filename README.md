@@ -11,7 +11,7 @@ A static recompilation project that translates PowerPC (Gekko/Broadway) assembly
 
 ---
 
-## ⚖️ Legal Disclaimer
+##  Legal Disclaimer
 
 This repository **does NOT contain** any copyrighted game assets, ISOs, `.rvz` images, or original game binaries.
 
@@ -19,7 +19,7 @@ This project is strictly for educational, research, and reverse-engineering purp
 
 ---
 
-## 🛠️ Environment & Toolchain
+##  Environment & Toolchain
 
 * **Target Game:** *SpongeBob SquarePants: Truth or Square* (Wii NTSC - `R8IE78`)
 * **Host OS:** CachyOS (Arch Linux) x86_64
@@ -30,7 +30,7 @@ This project is strictly for educational, research, and reverse-engineering purp
 
 ---
 
-## 📊 Current Status & Pipeline Progress
+##  Current Status & Pipeline Progress
 
 ```text
 Overall Pipeline Progress: [██████████████████░░░░░░░] ~72%
@@ -49,7 +49,7 @@ Overall Pipeline Progress: [█████████████████�
 
 ---
 
-## 🔬 Technical Highlights & Engineering Notes
+##  Technical Highlights & Engineering Notes
 
 ### 1. IRQ 27 & Runtime Exception Fix
 
@@ -76,7 +76,7 @@ The Gekko/Broadway processor uses **Opcode 4** for 64-bit paired-single floating
 
 ---
 
-## 🚀 Building & Running
+##  Building & Running
 
 ### 1. Prerequisites (Arch / CachyOS)
 
