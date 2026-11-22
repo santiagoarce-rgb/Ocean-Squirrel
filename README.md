@@ -37,10 +37,10 @@ The goal is the same as [Ocean Crab](https://github.com/santiagoarce-rgb/OceanCr
 ## Status
 
 > [!WARNING]
-> **Boots, but no frames yet.** The game gets through the Wii OS, IOS and audio-interface init, then waits for the DSP audio microcode to report that it started. See [Current blocker](#current-blocker-dsp-task-never-starts).
+> **Boots into the engine, but no frames yet.** The game gets through the Wii OS, IOS, audio interface and DSP/AX init, opens its data files and starts running engine code, then crashes. See [Current blocker](#current-blocker-engine-crash-after-audio-init).
 
 ```text
-Boot progress  [███████████████████████░░]  ~90%
+Boot progress  [███████████████████████░░]  ~92%
 ```
 
 | Area | | Notes |
@@ -48,36 +48,32 @@ Boot progress  [█████████████████████�
 | Analysis | ✅ | `main.dol` parsed, 25,352 PowerPC functions found |
 | Code generation | ✅ | One generated `output.cpp`, about 11M lines |
 | Native build | ✅ | A clean build takes about 46 min |
-| Disc / FST | ✅ | `boot.bin` (`R8IE78`) parsed, FST loaded |
+| Disc / FST | ✅ | `boot.bin` (`R8IE78`) parsed, FST loaded, `boot.ini` / `sb09.ini` found |
 | Video init | ✅ | OpenGL 4.6 context, EFB framebuffer, SDL2 window |
 | Wii OS boot | ✅ | `Revolution OS / Kernel built : Feb 27 2009` |
 | IOS & IPC | ✅ | `/dev/di`, `/dev/fs`, `/dev/es`, `/dev/stm`, `/dev/usb`, sync + async; IRQ 27 dispatching |
 | IOS state machine | ⚠️ | Forced past with a workaround; see [notes](#ios-state-machine-wait-at-0x805189b0) |
 | Paired singles | ⚠️ | `psq_lx` / `psq_stx` added as a local recompiler patch, not upstreamed |
 | Audio interface (AI) | ✅ | `AIInit` passes since the AI mirror fix; see [notes](#the-frame-counter-that-was-an-audio-counter) |
-| **DSP / AX microcode** | ❌ | **Blocker.** Waits forever at `0x80510E00` for the DSP task's init callback |
-| Rendering | ⏳ | Waiting on the DSP blocker |
+| DSP / AX microcode | ✅ | Task boots, init callback runs, DSP and AI-DMA interrupts (5, 7) fire; see [notes](#a-null-vi-handler-starved-the-dsp) |
+| **Engine start** | ❌ | **Blocker.** Calls through null function pointers, then jumps to `0xB8A10090` |
+| Rendering | ⏳ | Waiting on the engine blocker |
 | Input, saving | ⏳ | Not started |
 
-### Current blocker: DSP task never starts
+### Current blocker: engine crash after audio init
 
-Right after audio-interface init, the game hands the AX audio microcode to the DSP and waits for it to come up:
+With audio up, the game runs engine code (`0x803Cxxxx`, `0x8040xxxx`) and then:
 
-```c
-// 0x80510DF0
-DSPAddTask(&task_80795CC0);          // bl 0x80542F20
-while (dsp_ready_80510CB0 == 0) {}   // lwz r0, -23448(r13) ; spin at 0x80510E00
-```
+- calls through **null function pointers** at `0x803C976C`, `0x803C922C` and `0x8040C8xx` (`lwz r12, 0(r4); mtctr r12; bctrl`), which the runtime turns into no-ops,
+- and finally dispatches to a garbage address, `0xB8A10090`.
 
-- The flag is written only by `0x80510CB0` (`li r0,1; stw r0,-23448(r13)`), which is the **init callback** of the `DSPTaskInfo` at `0x80795CC0`.
-- The SDK calls that callback when the DSP boots the microcode and mails back that it is ready. The runtime's DSP HLE never sends that mail, so the callback never runs.
-- At the hang, `PI_INTSR = 0x140`: a DSP interrupt (`0x40`) is pending alongside VI.
+Just before that, newly created threads (stacks in MEM2, around `0x91C2xxxx`) resume at `0x8057247C`, which is not a recompiled entry point and falls back to the interpreter (`UNKNOWN DISPATCH TO 0x8057247c`).
 
 **Next steps**
 
-1. Check whether the pending DSP interrupt is ever dispatched to `__OSInterruptTable[7]` (`0x8000305C`).
-2. Make the DSP HLE answer the task boot handshake (the `DSP_INIT` mail) so the SDK runs the init callback.
-3. Then remove the forced VI unmask experiments, which are no longer needed.
+1. Work out what `0x8057247C` is (a context-restore return point) and make thread resumes there land in recompiled code instead of the interpreter.
+2. Find which objects own the null function pointers at `0x803C976C` / `0x803C922C` and why they were never initialized.
+3. Remove the forced VI unmask experiments.
 
 ## How it works
 
@@ -113,7 +109,7 @@ sudo pacman -S --needed base-devel cmake sdl2 git
 
 ### 1. Prepare your game files
 
-Extract your disc so you have a directory with `sys/` (containing `main.dol` and `boot.bin`) and `files/`.
+Extract your disc so you have a directory with `sys/` (containing `main.dol` and `boot.bin`) and `files/`.\n\n> [!TIP]\n> Dolphin's *Extract Entire Disc* puts the game partition under `DATA/`. Point the runner (and `input_game_dir`) at that `DATA/` folder, otherwise the game cannot find `boot.ini` and its other data files.
 
 ### 2. Build NWiiRecomp
 
@@ -183,6 +179,18 @@ The runtime registered AI only at the GameCube address `0xCC006C00`, while the I
 **Fix:** map the AI mirror at `0xCD006C00` and use the real `AICR` bit layout (PSTAT = bit 0, SCRESET = bit 5 strobe, AISFR selects 32/48 kHz). The game now gets through `AIInit`.
 
 **Lesson:** check what a base register really points to before naming what it reads.
+</details>
+
+<details>
+<summary><b>A null VI handler starved the DSP</b></summary>
+
+#### A null VI handler starved the DSP
+
+After `AIInit`, the game called `DSPAddTask` and waited at `0x80510E00` for the task's init callback. The DSP HLE was already answering the boot mails, and a DSP interrupt was pending, but the game never read the reply.
+
+The runtime picked one interrupt source per check with a fixed priority chain, and VI came before DSP. VI was forced pending by an earlier experiment, but no VI handler was registered yet, so every check chose VI, found a NULL handler and gave up (52,881 times in one run). The DSP was never served.
+
+**Fix:** pick the highest-priority pending source **that has a handler**. The DSP interrupt now reaches `__DSPHandler`, the `DCD1 0000` mail is read and the init callback runs.
 </details>
 
 <details>
@@ -262,7 +270,7 @@ Regenerating the code wipes this edit. The proper fix is a Bluetooth (`oh1`) HLE
 
 | Phase | | Goal |
 |---|:---:|---|
-| **Bring-up** | 🚧 | Done: recompile, native build, Wii OS / IOS / DI / ES boot, SDL2 + OpenGL context, IRQ 27. Left: **DSP / AX microcode boot** ← current, first frame in the EFB, title screen, menus, gameplay |
+| **Bring-up** | 🚧 | Done: recompile, native build, Wii OS / IOS / DI / ES boot, SDL2 + OpenGL context, IRQ 27. Left: **engine start crash** ← current, first frame in the EFB, title screen, menus, gameplay |
 | 1 · Correctness | 🔭 | Bluetooth / Wii Remote HLE (replaces the IOS workaround), audio (AI/DSP), saving, upstream the paired-singles and runtime patches |
 | 2 · Understanding | 🔭 | Symbol map and game structures, sharing what was already learned in [Ocean Crab](https://github.com/santiagoarce-rgb/OceanCrab) (same game, different port) |
 | 3 · Enhancements | 🔭 | In-game options menu, high resolution, widescreen, 60 FPS |
@@ -270,7 +278,7 @@ Regenerating the code wipes this edit. The proper fix is a Bluetooth (`oh1`) HLE
 
 ## Contributing
 
-Help is very welcome, especially with **DSP / AX microcode HLE**, IOS Bluetooth HLE, and GX rendering once frames start flowing. Read [`CONTRIBUTING.md`](CONTRIBUTING.md) first. It covers the commit style and the rule about never committing generated code or game data.
+Help is very welcome, especially with **the engine start crash** (thread resume at `0x8057247C`, null function pointers), IOS Bluetooth HLE, and GX rendering once frames start flowing. Read [`CONTRIBUTING.md`](CONTRIBUTING.md) first. It covers the commit style and the rule about never committing generated code or game data.
 
 General-purpose fixes to the recompiler and runtime are intended to go back upstream to [NWiiRecomp](https://github.com/BlackLineInteractive/NWiiRecomp).
 
