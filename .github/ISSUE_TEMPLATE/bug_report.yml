@@ -1,0 +1,44 @@
+name: Bug report
+description: A crash, hang, rendering or audio problem
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please do **not** attach game files, extracted assets or generated code.
+  - type: input
+    id: commit
+    attributes:
+      label: Commit
+      description: Ocean Squirrel and NWiiRecomp commits (`git rev-parse --short HEAD`)
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: System
+      description: Distro, compiler version and GPU/driver
+      placeholder: CachyOS, GCC 15, NVIDIA GTX 1650
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: Include the exact command and environment variables
+      placeholder: |
+        NWII_SAMPLE=1 ./build/SpongeBobTruthOrSquare /path/to/game
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What happened vs. what you expected
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: Paste the last ~100 lines; for hangs, a run with `NWII_SAMPLE=1`
+      render: text

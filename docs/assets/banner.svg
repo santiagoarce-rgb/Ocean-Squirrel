@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 300" width="400" height="300">
+  <rect x="4" y="4" width="392" height="292" rx="28" fill="#e9f6fc"/>
+  <path d="M4 250 Q70 230 140 250 T280 250 T396 248 V268 Q396 296 368 296 H32 Q4 296 4 268 Z" fill="#f3dfae"/>
+  <!-- bubbles -->
+  <g fill="#cfeefa" stroke="#1b1b1b" stroke-width="3">
+    <circle cx="300" cy="70" r="14"/>
+    <circle cx="328" cy="36" r="9"/>
+    <circle cx="96" cy="96" r="11"/>
+    <circle cx="78" cy="60" r="6"/>
+  </g>
+  <g fill="#fff" opacity=".9">
+    <circle cx="295" cy="65" r="4"/>
+    <circle cx="92" cy="92" r="3"/>
+  </g>
+  <!-- acorn body -->
+  <path d="M138 140 Q138 250 200 272 Q262 250 262 140 Z" fill="#d98a3d" stroke="#1b1b1b" stroke-width="5" stroke-linejoin="round"/>
+  <path d="M160 160 Q162 225 196 252" fill="none" stroke="#f2b878" stroke-width="10" stroke-linecap="round" opacity=".8"/>
+  <!-- cap -->
+  <path d="M120 146 Q122 92 200 88 Q278 92 280 146 Q200 160 120 146 Z" fill="#7a4a22" stroke="#1b1b1b" stroke-width="5" stroke-linejoin="round"/>
+  <g stroke="#5a3415" stroke-width="3" stroke-linecap="round" fill="none">
+    <path d="M150 128 l12 -14 M178 134 l12 -18 M206 136 l12 -18 M234 132 l12 -16"/>
+  </g>
+  <!-- stem -->
+  <path d="M200 88 Q198 64 214 52" fill="none" stroke="#1b1b1b" stroke-width="8" stroke-linecap="round"/>
+  <!-- face -->
+  <g fill="#1b1b1b">
+    <ellipse cx="180" cy="186" rx="7" ry="10"/>
+    <ellipse cx="220" cy="186" rx="7" ry="10"/>
+  </g>
+  <g fill="#fff"><circle cx="182" cy="182" r="2.5"/><circle cx="222" cy="182" r="2.5"/></g>
+  <path d="M178 212 Q200 230 222 212" fill="none" stroke="#1b1b1b" stroke-width="4" stroke-linecap="round"/>
+  <g fill="#f07c7c" opacity=".6"><ellipse cx="164" cy="208" rx="9" ry="5"/><ellipse cx="236" cy="208" rx="9" ry="5"/></g>
+</svg>
