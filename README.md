@@ -1,15 +1,33 @@
-# Ocean-Squirrel
+<div align="center">
 
-**Native PC port of *SpongeBob SquarePants: Truth or Square* (Wii) via static recompilation.**
+# 🐿️🌊 Ocean-Squirrel
 
-Ocean-Squirrel translates the game's PowerPC (Broadway) code into C++ and runs it natively on Linux, using the [NWiiRecomp](https://github.com/BlackLineInteractive/NWiiRecomp) recompiler and its HLE runtime.
+### Native PC port of *SpongeBob SquarePants: Truth or Square* (Wii) via static recompilation
+
+<p>
+  <img src="https://img.shields.io/badge/status-boots%20to%20main%20loop-yellow?style=flat-square" alt="Status: boots to main loop"/>
+  <img src="https://img.shields.io/badge/game-R8IE78%20(NTSC--U)-0099DD?style=flat-square&logo=wii&logoColor=white" alt="Game: R8IE78"/>
+  <img src="https://img.shields.io/badge/host-Linux%20x86__64-FCC624?style=flat-square&logo=linux&logoColor=black" alt="Host: Linux x86_64"/>
+  <img src="https://img.shields.io/badge/OpenGL-4.6-5586A4?style=flat-square&logo=opengl&logoColor=white" alt="OpenGL 4.6"/>
+  <a href="https://github.com/BlackLineInteractive/NWiiRecomp"><img src="https://img.shields.io/badge/built%20with-NWiiRecomp-6C4BD8?style=flat-square" alt="Built with NWiiRecomp"/></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="License: MIT"/></a>
+  <img src="https://img.shields.io/github/last-commit/santiagoarce-rgb/Ocean-Squirrel?style=flat-square" alt="Last commit"/>
+</p>
+
+**[Status](#-status)** · **[Current blocker](#-current-blocker-no-vi-retrace-handler)** · **[Engineering notes](#-engineering-notes)** · **[Building](#-building)** · **[Roadmap](#%EF%B8%8F-roadmap)**
+
+</div>
+
+---
+
+Ocean-Squirrel translates the game's PowerPC (Broadway) code into C++ and runs it **natively on Linux**, using the [NWiiRecomp](https://github.com/BlackLineInteractive/NWiiRecomp) recompiler and its HLE runtime. No emulator, no interpreter loop — just the game's own code compiled for your PC.
 
 | | |
 | --- | --- |
-| **Game** | *SpongeBob SquarePants: Truth or Square* — Wii, NTSC-U, `R8IE78` |
-| **Toolchain** | [NWiiRecomp](https://github.com/BlackLineInteractive/NWiiRecomp) (PPC → C++) |
-| **Host** | Linux x86_64 (developed on CachyOS), GCC, CMake, SDL2, OpenGL 4.6 |
-| **Status** | Boots through the Wii OS and IOS init, reaches the main loop, **no frames rendered yet** |
+| 🎮 **Game** | *SpongeBob SquarePants: Truth or Square* — Wii, NTSC-U, `R8IE78` |
+| 🛠️ **Toolchain** | [NWiiRecomp](https://github.com/BlackLineInteractive/NWiiRecomp) (PPC → C++) |
+| 🐧 **Host** | Linux x86_64 (developed on CachyOS), GCC, CMake, SDL2, OpenGL 4.6 |
+| 📍 **Status** | Boots through the Wii OS and IOS init, reaches the main loop, **no frames rendered yet** |
 
 > [!NOTE]
 > This repository is the project's **log and documentation**. The recompiler patches and runtime changes currently live in a local NWiiRecomp checkout and have not been published yet.
@@ -21,30 +39,47 @@ Ocean-Squirrel translates the game's PowerPC (Broadway) code into C++ and runs i
 
 ---
 
-## Status
+## 📊 Status
 
 ```text
 Boot progress  [██████████████████████░░░]  ~88%
 ```
 
+```mermaid
+flowchart LR
+    A["main.dol"] --> B["Analyze<br/>25,352 funcs"]
+    B --> C["Emit C++<br/>~11M lines"]
+    C --> D["Native build"]
+    D --> E["Wii OS + IOS boot"]
+    E --> F["Main loop"]
+    F -. "❌ VI frame counter<br/>never advances" .-> G["First frame"]
+
+    classDef done fill:#2ea04326,stroke:#2ea043;
+    classDef blocked fill:#d2992226,stroke:#d29922;
+    classDef todo fill:#8b949e1a,stroke:#8b949e,stroke-dasharray:4 3;
+    class A,B,C,D,E done;
+    class F blocked;
+    class G todo;
+```
+
 | Stage | State | Notes |
-| --- | --- | --- |
-| Analysis of `main.dol` | ✅ Done | 25,352 PowerPC functions found |
-| C++ emission | ✅ Done | One generated `output.cpp`, about 11M lines |
-| Native build & link | ✅ Done | A clean build takes about 46 min |
-| Disc / FST loading | ✅ Done | `boot.bin` (`R8IE78`) parsed, FST loaded |
-| Video init | ✅ Done | OpenGL 4.6 context, EFB framebuffer, SDL2 window |
-| Wii OS boot | ✅ Done | `Revolution OS / Kernel built : Feb 27 2009` |
-| IOS devices & IPC | ✅ Done | `/dev/di`, `/dev/fs`, `/dev/es`, `/dev/stm`, `/dev/usb`, sync + async |
-| IPC interrupt (IRQ 27) | ✅ Done | Dispatching correctly; see [notes](#irq-27-was-working-all-along) |
-| IOS state-machine wait | ⚠️ Workaround | Forced past; see [notes](#ios-state-machine-wait-at-0x805189b0) |
-| Paired singles (`psq_lx` / `psq_stx`) | ⚠️ Local patch | Added to the recompiler, not yet upstreamed |
-| **VI / frame counter** | ❌ **Blocker** | Main loop waits forever at `0x8050E604` |
-| First rendered frame | ⏳ Not started | Waiting on the VI blocker |
+| --- | :---: | --- |
+| Analysis of `main.dol` | ✅ | 25,352 PowerPC functions found |
+| C++ emission | ✅ | One generated `output.cpp`, about 11M lines |
+| Native build & link | ✅ | A clean build takes about 46 min |
+| Disc / FST loading | ✅ | `boot.bin` (`R8IE78`) parsed, FST loaded |
+| Video init | ✅ | OpenGL 4.6 context, EFB framebuffer, SDL2 window |
+| Wii OS boot | ✅ | `Revolution OS / Kernel built : Feb 27 2009` |
+| IOS devices & IPC | ✅ | `/dev/di`, `/dev/fs`, `/dev/es`, `/dev/stm`, `/dev/usb`, sync + async |
+| IPC interrupt (IRQ 27) | ✅ | Dispatching correctly; see [notes](#irq-27-was-working-all-along) |
+| IOS state-machine wait | ⚠️ | **Workaround** — forced past; see [notes](#ios-state-machine-wait-at-0x805189b0) |
+| Paired singles (`psq_lx` / `psq_stx`) | ⚠️ | **Local patch** — added to the recompiler, not yet upstreamed |
+| **VI / frame counter** | ❌ | **Blocker** — main loop waits forever at `0x8050E604` |
+| First rendered frame | ⏳ | Waiting on the VI blocker |
 
 ---
 
-## Current blocker: no VI retrace handler
+## 🚧 Current blocker: no VI retrace handler
 
 The game reaches its main loop and then busy-waits for a frame counter that never changes:
 
@@ -58,15 +93,16 @@ do {
 
 That counter is normally advanced once per frame by the vertical-retrace (VI) interrupt path.
 
-**What the logs show:**
+**🔎 What the logs show**
 
 - The game itself never unmasks VI. Its writes to `PI_INTMR` (`0xCC003004`) are `0xF0`, `0xF8` and `0x40F8`. Bit 8 (`0x100`, VI) never appears, and neither do the PE bits (`0x200`, `0x400`).
 - As an experiment, the runtime was patched to force VI unmasked and to fire a retrace periodically. The VI interrupt now shows up as pending (`INTSR = 0x100`), **but the game still spins.**
 - The reason is that `__OSInterruptTable[24]` (the VI slot, at `0x800030A0`) is **0**. No retrace handler was ever registered, so delivering the interrupt does nothing.
 
-**Working theory:** the real VI/GX initialization of the SDK (`VIInit` / `GXInit`) either never runs or fails partway. Normally that code registers `__VIRetraceHandler` and unmasks VI and PE itself. The signature database does not recognize these functions in this DOL, so they have no names to hook.
+> [!TIP]
+> **Working theory:** the real VI/GX initialization of the SDK (`VIInit` / `GXInit`) either never runs or fails partway. Normally that code registers `__VIRetraceHandler` and unmasks VI and PE itself. The signature database does not recognize these functions in this DOL, so they have no names to hook.
 
-**Next steps:**
+**🧭 Next steps**
 
 1. Find the game's `VIInit` without symbols: look for writes to `0x800030A0`, or for calls to `__OSSetInterruptHandler` with `r3 = 24`.
 2. Find who writes `+0x6C08(r31)`. That is most likely a post-retrace callback.
@@ -75,7 +111,10 @@ That counter is normally advanced once per frame by the vertical-retrace (VI) in
 
 ---
 
-## Engineering notes
+## 📓 Engineering notes
+
+<details>
+<summary><b>IRQ 27 was working all along</b></summary>
 
 ### IRQ 27 was working all along
 
@@ -92,7 +131,12 @@ if (os_intr != 24 && (vi_dispatch_count++ % 256) == 0) {
 
 This prints only 1 dispatch in 256. With the rate limit removed, the log shows **16 dispatches** during boot.
 
-**Lesson:** make sure your instrumentation is actually in the binary you are running. See [Pitfalls](#pitfalls).
+**Lesson:** make sure your instrumentation is actually in the binary you are running. See [Pitfalls](#%EF%B8%8F-pitfalls).
+
+</details>
+
+<details>
+<summary><b>IOS state-machine wait at <code>0x805189B0</code></b></summary>
 
 ### IOS state-machine wait at `0x805189B0`
 
@@ -117,18 +161,28 @@ ctx.gpr[3] = ctx.mmu.read8(ctx.gpr[3] + 1614);
   } }
 ```
 
-Regenerating the code wipes this edit. The proper fix is a Bluetooth (`oh1`) HLE that completes those requests.
+> [!WARNING]
+> Regenerating the code wipes this edit. The proper fix is a Bluetooth (`oh1`) HLE that completes those requests.
+
+</details>
+
+<details>
+<summary><b>HLE coverage used by this game</b></summary>
 
 ### HLE coverage used by this game
 
-- **ES** (ETicket Services): returns a valid title ID and `TicketView` data.
-- **DI**: answers `DVDLowInquiry` and reads from the extracted disc.
-- **IPC** (`0xCD000000`): `PPCMSG` / `PPCCTRL` / `ARMMSG` / `ARMCTRL` registers, with replies delivered as IRQ 27.
-- **Callback dispatcher**: runs async IOS callbacks on the guest thread.
+| Component | What it does |
+| --- | --- |
+| **ES** (ETicket Services) | Returns a valid title ID and `TicketView` data |
+| **DI** | Answers `DVDLowInquiry` and reads from the extracted disc |
+| **IPC** (`0xCD000000`) | `PPCMSG` / `PPCCTRL` / `ARMMSG` / `ARMCTRL` registers, with replies delivered as IRQ 27 |
+| **Callback dispatcher** | Runs async IOS callbacks on the guest thread |
+
+</details>
 
 ---
 
-## Pitfalls
+## ⚠️ Pitfalls
 
 - **Two copies of the runtime.** The generated project in `build/recompiled/` builds against `build/recompiled/nWiiRuntime/`, not against the top-level `nWiiRuntime/`. Editing the top-level copy does nothing until the files are copied over. The reverse also bites: `build/` is git-ignored, so work done only in the generated copy is not version-controlled, and the recompiler overwrites it when it regenerates. To check which copy you are running:
 
@@ -142,15 +196,18 @@ Regenerating the code wipes this edit. The proper fix is a Bluetooth (`oh1`) HLE
 
 ---
 
-## Building
+## 🔨 Building
 
-### Prerequisites (Arch / CachyOS)
+<details open>
+<summary><b>Prerequisites (Arch / CachyOS)</b></summary>
 
 ```sh
 sudo pacman -S --needed base-devel cmake sdl2 git
 ```
 
-### 1. Build NWiiRecomp
+</details>
+
+**1. Build NWiiRecomp**
 
 ```sh
 git clone https://github.com/BlackLineInteractive/NWiiRecomp.git
@@ -159,9 +216,7 @@ cmake -B build
 cmake --build build -j"$(nproc)"
 ```
 
-### 2. Configure
-
-Create `recomp_config.toml` in the NWiiRecomp root:
+**2. Configure** — create `recomp_config.toml` in the NWiiRecomp root:
 
 ```toml
 project_name       = "SpongeBobTruthOrSquare"
@@ -170,7 +225,7 @@ output_dir         = "build/recompiled"
 runtime_source_dir = "nWiiRuntime"
 ```
 
-### 3. Recompile and build
+**3. Recompile and build**
 
 ```sh
 ./build/nWiiRecomp/nwiirecomp recomp_config.toml
@@ -180,13 +235,17 @@ cmake -B build -DCMAKE_BUILD_TYPE=Release -DSDL_PIPEWIRE=OFF -DCMAKE_POLICY_VERS
 cmake --build build -j"$(nproc)"
 ```
 
-The first build takes about 46 minutes, mostly compiling `output.cpp`. After that, runtime-only changes rebuild in seconds.
+> [!NOTE]
+> The first build takes about **46 minutes**, mostly compiling `output.cpp`. After that, runtime-only changes rebuild in seconds.
 
-### 4. Run
+**4. Run**
 
 ```sh
 ./build/SpongeBobTruthOrSquare "/path/to/extracted/game"
 ```
+
+<details>
+<summary><b>🧰 Debug environment variables</b></summary>
 
 | Variable | Effect |
 | --- | --- |
@@ -198,9 +257,11 @@ The first build takes about 46 minutes, mostly compiling `output.cpp`. After tha
 | `NWII_VITRACE=1` | Log VI interrupt triggers |
 | `SDL_VIDEODRIVER=x11` | Force X11 under Wayland |
 
+</details>
+
 ---
 
-## Roadmap
+## 🗺️ Roadmap
 
 - [x] Recompile `main.dol` to C++
 - [x] Native build and link
@@ -218,17 +279,21 @@ The first build takes about 46 minutes, mostly compiling `output.cpp`. After tha
 
 ---
 
-## A note from the developer
+## 💛 A note from the developer
 
-I'm a full-time university student in a field that has nothing to do with programming. AI tools have helped me close a lot of technical gaps and learn faster. This is a labor of love, driven by nostalgia for a childhood favorite, plus curiosity and fun. Thanks for checking it out!
+> I'm a full-time university student in a field that has nothing to do with programming. AI tools have helped me close a lot of technical gaps and learn faster. This is a labor of love, driven by nostalgia for a childhood favorite, plus curiosity and fun. Thanks for checking it out!
 
-## Acknowledgments
+## 🙏 Acknowledgments
 
-- [NWiiRecomp](https://github.com/BlackLineInteractive/NWiiRecomp) by Blackline Interactive: the recompiler and runtime this project builds on.
-- [Dolphin](https://github.com/dolphin-emu/dolphin): documentation of the Wii's IPC, PI, VI, and IOS behavior.
-- [WiiBrew](https://wiibrew.org) and [YAGCD](https://hitmen.c02.at/files/yagcd/): hardware references.
-- libogc / devkitPro: references for the Wii kernel and syscalls.
+- **[NWiiRecomp](https://github.com/BlackLineInteractive/NWiiRecomp)** by Blackline Interactive — the recompiler and runtime this project builds on.
+- **[Dolphin](https://github.com/dolphin-emu/dolphin)** — documentation of the Wii's IPC, PI, VI, and IOS behavior.
+- **[WiiBrew](https://wiibrew.org)** and **[YAGCD](https://hitmen.c02.at/files/yagcd/)** — hardware references.
+- **libogc / devkitPro** — references for the Wii kernel and syscalls.
 
-## License
+## 📄 License
 
 The documentation in this repository is released under the [MIT License](LICENSE). NWiiRecomp ships under its own license; see its repository.
+
+<div align="center">
+<sub>Made with 🍍 and way too many log files.</sub>
+</div>
