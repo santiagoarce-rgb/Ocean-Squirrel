@@ -109,7 +109,10 @@ sudo pacman -S --needed base-devel cmake sdl2 git
 
 ### 1. Prepare your game files
 
-Extract your disc so you have a directory with `sys/` (containing `main.dol` and `boot.bin`) and `files/`.\n\n> [!TIP]\n> Dolphin's *Extract Entire Disc* puts the game partition under `DATA/`. Point the runner (and `input_game_dir`) at that `DATA/` folder, otherwise the game cannot find `boot.ini` and its other data files.
+Extract your disc so you have a directory with `sys/` (containing `main.dol` and `boot.bin`) and `files/`.
+
+> [!TIP]
+> Dolphin's *Extract Entire Disc* puts the game partition under `DATA/`. Point the runner (and `input_game_dir`) at that `DATA/` folder, otherwise the game cannot find `boot.ini` and its other data files.
 
 ### 2. Build NWiiRecomp
 
