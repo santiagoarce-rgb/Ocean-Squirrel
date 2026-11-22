@@ -37,10 +37,10 @@ The goal is the same as [Ocean Crab](https://github.com/santiagoarce-rgb/OceanCr
 ## Status
 
 > [!WARNING]
-> **Boots, but no frames yet.** The game gets through the Wii OS and IOS init and reaches its main loop, where it waits for a VI retrace that never arrives. See [Current blocker](#current-blocker-no-vi-retrace-handler).
+> **Boots, but no frames yet.** The game gets through the Wii OS, IOS and audio-interface init, then waits for the DSP audio microcode to report that it started. See [Current blocker](#current-blocker-dsp-task-never-starts).
 
 ```text
-Boot progress  [██████████████████████░░░]  ~88%
+Boot progress  [███████████████████████░░]  ~90%
 ```
 
 | Area | | Notes |
@@ -54,36 +54,30 @@ Boot progress  [█████████████████████�
 | IOS & IPC | ✅ | `/dev/di`, `/dev/fs`, `/dev/es`, `/dev/stm`, `/dev/usb`, sync + async; IRQ 27 dispatching |
 | IOS state machine | ⚠️ | Forced past with a workaround; see [notes](#ios-state-machine-wait-at-0x805189b0) |
 | Paired singles | ⚠️ | `psq_lx` / `psq_stx` added as a local recompiler patch, not upstreamed |
-| **VI / frame counter** | ❌ | **Blocker.** Main loop waits forever at `0x8050E604` |
-| Rendering | ⏳ | Waiting on the VI blocker |
-| Audio, input, saving | ⏳ | Not started |
+| Audio interface (AI) | ✅ | `AIInit` passes since the AI mirror fix; see [notes](#the-frame-counter-that-was-an-audio-counter) |
+| **DSP / AX microcode** | ❌ | **Blocker.** Waits forever at `0x80510E00` for the DSP task's init callback |
+| Rendering | ⏳ | Waiting on the DSP blocker |
+| Input, saving | ⏳ | Not started |
 
-### Current blocker: no VI retrace handler
+### Current blocker: DSP task never starts
 
-The game reaches its main loop and then busy-waits for a frame counter that never changes:
+Right after audio-interface init, the game hands the AX audio microcode to the DSP and waits for it to come up:
 
 ```c
-// spin inside func_8050E590, PC 0x8050E604
-uint32_t start = r3;
-do {
-    r0 = read_u32(r31 + 27656) & 0x7FFFFFFF;   // global frame counter (offset 0x6C08)
-} while (r0 == start);
+// 0x80510DF0
+DSPAddTask(&task_80795CC0);          // bl 0x80542F20
+while (dsp_ready_80510CB0 == 0) {}   // lwz r0, -23448(r13) ; spin at 0x80510E00
 ```
 
-That counter is normally advanced once per frame by the vertical-retrace (VI) interrupt path.
-
-- The game itself never unmasks VI. Its writes to `PI_INTMR` (`0xCC003004`) are `0xF0`, `0xF8` and `0x40F8`. Bit 8 (`0x100`, VI) never appears, and neither do the PE bits (`0x200`, `0x400`).
-- As an experiment, the runtime was patched to force VI unmasked and to fire a retrace periodically. The VI interrupt now shows up as pending (`INTSR = 0x100`), **but the game still spins.**
-- The reason is that `__OSInterruptTable[24]` (the VI slot, at `0x800030A0`) is **0**. No retrace handler was ever registered, so delivering the interrupt does nothing.
-
-**Working theory:** the SDK's real VI/GX initialization (`VIInit` / `GXInit`) either never runs or fails partway. Normally that code registers `__VIRetraceHandler` and unmasks VI and PE itself. The signature database does not recognize these functions in this DOL, so they have no names to hook.
+- The flag is written only by `0x80510CB0` (`li r0,1; stw r0,-23448(r13)`), which is the **init callback** of the `DSPTaskInfo` at `0x80795CC0`.
+- The SDK calls that callback when the DSP boots the microcode and mails back that it is ready. The runtime's DSP HLE never sends that mail, so the callback never runs.
+- At the hang, `PI_INTSR = 0x140`: a DSP interrupt (`0x40`) is pending alongside VI.
 
 **Next steps**
 
-1. Find the game's `VIInit` without symbols: look for writes to `0x800030A0`, or for calls to `__OSSetInterruptHandler` with `r3 = 24`.
-2. Find who writes `+0x6C08(r31)`. That is most likely a post-retrace callback.
-3. Trace whether that code runs. If it never does, find what stalls initialization first (one thread is parked on a wait queue).
-4. Remove the forced-unmask hacks once the real init path works.
+1. Check whether the pending DSP interrupt is ever dispatched to `__OSInterruptTable[7]` (`0x8000305C`).
+2. Make the DSP HLE answer the task boot handshake (the `DSP_INIT` mail) so the SDK runs the init callback.
+3. Then remove the forced VI unmask experiments, which are no longer needed.
 
 ## How it works
 
@@ -175,6 +169,22 @@ The first build takes about **46 minutes**, mostly compiling `output.cpp`. After
 
 ## Engineering notes
 
+<details open>
+<summary><b>The "frame counter" that was an audio counter</b></summary>
+
+#### The frame counter that was an audio counter
+
+For a long time the main blocker was described as a missing VI retrace handler: the game spun at `0x8050E604` reading `+0x6C08(r31)`, which looked like a global frame counter.
+
+Disassembling `main.dol` showed that the function starts with `lis r31, 0xCD00`. So the register read is `0xCD006C08`, which is **`AISCNT`, the audio interface's streaming sample counter**, through the Wii's Hollywood mirror. The function is the SDK's `AIInit` latency check: it resets the counter (`AICR.SCRESET`), starts it (`AICR.PSTAT`), waits until it moves, and times that with `OSGetTime`.
+
+The runtime registered AI only at the GameCube address `0xCC006C00`, while the IPC block claimed all of `0xCD000000–0xCD00FFFF` and returned 0 for unknown registers. The counter therefore read 0 forever, and no amount of VI work could have helped.
+
+**Fix:** map the AI mirror at `0xCD006C00` and use the real `AICR` bit layout (PSTAT = bit 0, SCRESET = bit 5 strobe, AISFR selects 32/48 kHz). The game now gets through `AIInit`.
+
+**Lesson:** check what a base register really points to before naming what it reads.
+</details>
+
 <details>
 <summary><b>IRQ 27 was working all along</b></summary>
 
@@ -252,7 +262,7 @@ Regenerating the code wipes this edit. The proper fix is a Bluetooth (`oh1`) HLE
 
 | Phase | | Goal |
 |---|:---:|---|
-| **Bring-up** | 🚧 | Done: recompile, native build, Wii OS / IOS / DI / ES boot, SDL2 + OpenGL context, IRQ 27. Left: **VI retrace and frame counter** ← current, first frame in the EFB, title screen, menus, gameplay |
+| **Bring-up** | 🚧 | Done: recompile, native build, Wii OS / IOS / DI / ES boot, SDL2 + OpenGL context, IRQ 27. Left: **DSP / AX microcode boot** ← current, first frame in the EFB, title screen, menus, gameplay |
 | 1 · Correctness | 🔭 | Bluetooth / Wii Remote HLE (replaces the IOS workaround), audio (AI/DSP), saving, upstream the paired-singles and runtime patches |
 | 2 · Understanding | 🔭 | Symbol map and game structures, sharing what was already learned in [Ocean Crab](https://github.com/santiagoarce-rgb/OceanCrab) (same game, different port) |
 | 3 · Enhancements | 🔭 | In-game options menu, high resolution, widescreen, 60 FPS |
@@ -260,7 +270,7 @@ Regenerating the code wipes this edit. The proper fix is a Bluetooth (`oh1`) HLE
 
 ## Contributing
 
-Help is very welcome, especially with **finding `VIInit` / `GXInit` in this DOL**, IOS Bluetooth HLE, and GX rendering once frames start flowing. Read [`CONTRIBUTING.md`](CONTRIBUTING.md) first. It covers the commit style and the rule about never committing generated code or game data.
+Help is very welcome, especially with **DSP / AX microcode HLE**, IOS Bluetooth HLE, and GX rendering once frames start flowing. Read [`CONTRIBUTING.md`](CONTRIBUTING.md) first. It covers the commit style and the rule about never committing generated code or game data.
 
 General-purpose fixes to the recompiler and runtime are intended to go back upstream to [NWiiRecomp](https://github.com/BlackLineInteractive/NWiiRecomp).
 
