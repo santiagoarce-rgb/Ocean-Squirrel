@@ -37,14 +37,12 @@ The goal is the same as [Ocean Crab](https://github.com/santiagoarce-rgb/OceanCr
 ## Status
 
 > [!WARNING]
-> **The engine runs and talks to the GPU, but no frames yet.** The game gets through OS, IOS, audio, DSP and Wii Remote init, starts its engine threads, enables the GX interrupts and streams hundreds of thousands of commands into the GX FIFO. None of them are recognized as draws yet. See [Current blocker](#current-blocker-gx-commands-but-no-draws).
+> **The engine runs, but its file loader never reads the disc.** The game gets through OS, IOS, audio, DSP and Wii Remote init and starts its engine threads. Its I/O thread opens `boot.ini` and `domainUID.dir` but never reads them, so the pack-file directory stays NULL and the main thread searches garbage forever. See [Current blocker](#current-blocker-files-opened-but-never-read).
 
 ```text
 Boot progress  [████████████████████████░]  ~95%
 ```
 
-| Area | | Notes |
-|---|:---:|---|
 | Analysis | ✅ | `main.dol` parsed, 25,352 PowerPC functions found |
 | Code generation | ✅ | One generated `output.cpp`, about 11M lines |
 | Native build | ✅ | A clean build takes about 48 min and ~20 GB of RAM |
@@ -57,20 +55,38 @@ Boot progress  [█████████████████████�
 | Audio interface (AI) | ✅ | `AIInit` passes since the AI mirror fix; see [notes](#the-frame-counter-that-was-an-audio-counter) |
 | DSP / AX microcode | ✅ | Task boots, DSP and AI-DMA interrupts fire; see [notes](#a-null-vi-handler-starved-the-dsp) |
 | Engine start | ✅ | No more null-pointer calls since the `lwarx`/`stwcx.` fix; see [notes](#an-off-by-one-byte-refcount) |
-| GX FIFO | 🚧 | ~700k FIFO writes in 3 minutes, GX interrupts (CP, PE token, PE finish) unmasked |
-| **Draw calls** | ❌ | **Blocker.** The FIFO parser has not recognized a single draw yet |
-| Rendering | ⏳ | Waiting on the draw blocker |
+| GX FIFO | ✅ | Parsed cleanly; so far only state, clears and EFB copies (a black loading screen), no geometry yet |
+| **File loading** | ❌ | **Blocker.** `DVDOpen` succeeds but the I/O thread never issues a read |
+| Rendering | ⏳ | Waiting on the file-loading blocker |
 | Input, saving | ⏳ | Not started |
 
-### Current blocker: GX commands but no draws
+### Current blocker: files opened but never read
 
-The game now enables `PI_INTMR = 0x4FF8` (CP, PE token and PE finish on top of VI, DSP and IPC) and writes to the GX FIFO continuously, but the runtime's GX profiler keeps reporting `draws_snap=0`.
+Function names below come from the symbol map in [ToS-Decomp-Wii](https://github.com/spongeis5/ToS-Decomp-Wii) (`config/R8IE78/symbols.txt`), which covers this exact `main.dol`.
+
+The main thread is stuck here:
+
+```
+main → System::Game::Run → Step → zMainOGModule::UpdateGameApp → zMainInit
+  → zSceneLoadPackFile → xSTPreLoadScene → Loader::DomainDirMgr::PackFilePath
+    → Loader::Directory::FindEntry   (count read as 0x52384945 = "R8IE")
+```
+
+`FindEntry` is handed a **NULL directory**. The runtime maps address 0 onto `0x80000000`, so the entry count becomes the game ID `"R8IE"` (about 1.38 billion) and the search never ends. On hardware this would crash instead.
+
+The directory is NULL because nothing was ever read from the disc:
+
+- `/dev/di` only ever receives `0x86` (clear cover interrupt) and `0x12` (inquiry), never `0x71` (read).
+- The FST in memory (`0x817FEC40`, `0x13A0` bytes) is byte-identical to `fst.bin`, and `DVDOpen` succeeds for `./boot.ini`, `./domainUID.dir` and `./sb09.ini` (correct start and length in the `DVDFileInfo`).
+- The I/O thread `IO::MediaThreadLFS` receives the open commands, runs `OpenNewJob` → `ProcessBuckets` → `IO::DVDWrap::Open`, then waits on its command queue again. `IO::DVDWrap::Read` / `DVDReadAsyncPrio` are never called.
+
+The GX side is fine: a decoder run over a 334 KB FIFO dump consumed every byte cleanly and found only state setup, clears and ~2,400 EFB copies, which is what a black loading screen looks like.
 
 **Next steps**
 
-1. Dump the first few thousand bytes of the FIFO and decode them by hand: are they BP/XF/CP register loads only, or are there primitive (`0x80`–`0xB8`) or display-list (`0x40`) commands the parser skips?
-2. Check that the CPU-side FIFO pointers (`CP` base / end / write pointer at `0xCC00xxxx`) match what the game set up, so commands are read from the right place.
-3. Find the game's frame loop and see whether it waits on a PE token or draw-done that never arrives.
+1. Disassemble `IO::MediaThreadLFS::ProcessBuckets` and find the condition that decides whether an opened job gets a read.
+2. Find who should send the read command for `domainUID.dir`, and what the main thread waits on (or fails to wait on) before calling `PackFilePath`.
+3. Make null-pointer reads fault instead of returning low memory, so bugs like this crash where they start.
 
 ## How it works
 
@@ -284,7 +300,7 @@ The proper fix is a Bluetooth (`oh1`) HLE that completes those requests.
 
 | Phase | | Goal |
 |---|:---:|---|
-| **Bring-up** | 🚧 | Done: recompile, native build, Wii OS / IOS / DI / ES boot, SDL2 + OpenGL context, IRQ 27. Left: **first draw call** ← current, first frame in the EFB, title screen, menus, gameplay |
+| **Bring-up** | 🚧 | Done: recompile, native build, Wii OS / IOS / DI / ES boot, SDL2 + OpenGL context, IRQ 27. Left: **file loading** ← current, first frame in the EFB, title screen, menus, gameplay |
 | 1 · Correctness | 🔭 | Bluetooth / Wii Remote HLE (replaces the IOS workaround), audio (AI/DSP), saving, upstream the paired-singles and runtime patches |
 | 2 · Understanding | 🔭 | Symbol map and game structures, sharing what was already learned in [Ocean Crab](https://github.com/santiagoarce-rgb/OceanCrab) (same game, different port) |
 | 3 · Enhancements | 🔭 | In-game options menu, high resolution, widescreen, 60 FPS |
@@ -292,7 +308,7 @@ The proper fix is a Bluetooth (`oh1`) HLE that completes those requests.
 
 ## Contributing
 
-Help is very welcome, especially with **GX FIFO parsing** (why no draw calls are recognized yet), IOS Bluetooth HLE, and GX rendering once frames start flowing. Read [`CONTRIBUTING.md`](CONTRIBUTING.md) first. It covers the commit style and the rule about never committing generated code or game data.
+Help is very welcome, especially with **the I/O thread that never reads** (`IO::MediaThreadLFS::ProcessBuckets`), IOS Bluetooth HLE, and GX rendering once frames start flowing. Read [`CONTRIBUTING.md`](CONTRIBUTING.md) first. It covers the commit style and the rule about never committing generated code or game data.
 
 General-purpose fixes to the recompiler and runtime are intended to go back upstream to [NWiiRecomp](https://github.com/BlackLineInteractive/NWiiRecomp).
 
