@@ -37,43 +37,40 @@ The goal is the same as [Ocean Crab](https://github.com/santiagoarce-rgb/OceanCr
 ## Status
 
 > [!WARNING]
-> **Boots into the engine, but no frames yet.** The game gets through the Wii OS, IOS, audio interface and DSP/AX init, opens its data files and starts running engine code, then crashes. See [Current blocker](#current-blocker-engine-crash-after-audio-init).
+> **The engine runs and talks to the GPU, but no frames yet.** The game gets through OS, IOS, audio, DSP and Wii Remote init, starts its engine threads, enables the GX interrupts and streams hundreds of thousands of commands into the GX FIFO. None of them are recognized as draws yet. See [Current blocker](#current-blocker-gx-commands-but-no-draws).
 
 ```text
-Boot progress  [███████████████████████░░]  ~92%
+Boot progress  [████████████████████████░]  ~95%
 ```
 
 | Area | | Notes |
 |---|:---:|---|
 | Analysis | ✅ | `main.dol` parsed, 25,352 PowerPC functions found |
 | Code generation | ✅ | One generated `output.cpp`, about 11M lines |
-| Native build | ✅ | A clean build takes about 46 min |
+| Native build | ✅ | A clean build takes about 48 min and ~20 GB of RAM |
 | Disc / FST | ✅ | `boot.bin` (`R8IE78`) parsed, FST loaded, `boot.ini` / `sb09.ini` found |
 | Video init | ✅ | OpenGL 4.6 context, EFB framebuffer, SDL2 window |
 | Wii OS boot | ✅ | `Revolution OS / Kernel built : Feb 27 2009` |
 | IOS & IPC | ✅ | `/dev/di`, `/dev/fs`, `/dev/es`, `/dev/stm`, `/dev/usb`, sync + async; IRQ 27 dispatching |
-| IOS state machine | ⚠️ | Forced past with a workaround; see [notes](#ios-state-machine-wait-at-0x805189b0) |
+| Wii Remote (WPAD) init | ⚠️ | IOS state byte forced to ready with `NWII_FORCE_WPAD_READY=1`; see [notes](#ios-state-machine-wait-at-0x805189b0) |
 | Paired singles | ⚠️ | `psq_lx` / `psq_stx` added as a local recompiler patch, not upstreamed |
 | Audio interface (AI) | ✅ | `AIInit` passes since the AI mirror fix; see [notes](#the-frame-counter-that-was-an-audio-counter) |
-| DSP / AX microcode | ✅ | Task boots, init callback runs, DSP and AI-DMA interrupts (5, 7) fire; see [notes](#a-null-vi-handler-starved-the-dsp) |
-| **Engine start** | ❌ | **Blocker.** Calls through null function pointers, then jumps to `0xB8A10090` |
-| Rendering | ⏳ | Waiting on the engine blocker |
+| DSP / AX microcode | ✅ | Task boots, DSP and AI-DMA interrupts fire; see [notes](#a-null-vi-handler-starved-the-dsp) |
+| Engine start | ✅ | No more null-pointer calls since the `lwarx`/`stwcx.` fix; see [notes](#an-off-by-one-byte-refcount) |
+| GX FIFO | 🚧 | ~700k FIFO writes in 3 minutes, GX interrupts (CP, PE token, PE finish) unmasked |
+| **Draw calls** | ❌ | **Blocker.** The FIFO parser has not recognized a single draw yet |
+| Rendering | ⏳ | Waiting on the draw blocker |
 | Input, saving | ⏳ | Not started |
 
-### Current blocker: engine crash after audio init
+### Current blocker: GX commands but no draws
 
-With audio up, the game runs engine code (`0x803Cxxxx`, `0x8040xxxx`) and then:
-
-- calls through **null function pointers** at `0x803C976C`, `0x803C922C` and `0x8040C8xx` (`lwz r12, 0(r4); mtctr r12; bctrl`), which the runtime turns into no-ops,
-- and finally dispatches to a garbage address, `0xB8A10090`.
-
-Just before that, newly created threads (stacks in MEM2, around `0x91C2xxxx`) resume at `0x8057247C`, which is not a recompiled entry point and falls back to the interpreter (`UNKNOWN DISPATCH TO 0x8057247c`).
+The game now enables `PI_INTMR = 0x4FF8` (CP, PE token and PE finish on top of VI, DSP and IPC) and writes to the GX FIFO continuously, but the runtime's GX profiler keeps reporting `draws_snap=0`.
 
 **Next steps**
 
-1. Work out what `0x8057247C` is (a context-restore return point) and make thread resumes there land in recompiled code instead of the interpreter.
-2. Find which objects own the null function pointers at `0x803C976C` / `0x803C922C` and why they were never initialized.
-3. Remove the forced VI unmask experiments.
+1. Dump the first few thousand bytes of the FIFO and decode them by hand: are they BP/XF/CP register loads only, or are there primitive (`0x80`–`0xB8`) or display-list (`0x40`) commands the parser skips?
+2. Check that the CPU-side FIFO pointers (`CP` base / end / write pointer at `0xCC00xxxx`) match what the game set up, so commands are read from the right place.
+3. Find the game's frame loop and see whether it waits on a PE token or draw-done that never arrives.
 
 ## How it works
 
@@ -149,7 +146,7 @@ The first build takes about **46 minutes**, mostly compiling `output.cpp`. After
 ### 5. Run
 
 ```bash
-./build/SpongeBobTruthOrSquare "/path/to/extracted/game"
+NWII_FORCE_WPAD_READY=1 ./build/SpongeBobTruthOrSquare "/path/to/extracted/game/DATA"
 ```
 
 <details>
@@ -163,6 +160,10 @@ The first build takes about **46 minutes**, mostly compiling `output.cpp`. After
 | `NWII_LOOPTRACE=0xADDR` | Trace executions of one PC |
 | `NWII_PEEK=0xADDR,N` | Dump `N` words at `ADDR` on every heartbeat |
 | `NWII_VITRACE=1` | Log VI interrupt triggers |
+| `NWII_FORCE_WPAD_READY=1` | Force the Wii Remote IOS state byte to ready (needed to boot for now) |
+| `NWII_NULLDUMP=1` | On a call through a null pointer, dump registers, the object and the stack's return addresses |
+| `NWII_WATCH=0xADDR` | Report every change of one guest word, with the PC nearby |
+| `NWII_R13WATCH=1` | Report changes of the small-data base register `r13` |
 | `SDL_VIDEODRIVER=x11` | Force X11 under Wayland |
 </details>
 
@@ -194,6 +195,24 @@ After `AIInit`, the game called `DSPAddTask` and waited at `0x80510E00` for the 
 The runtime picked one interrupt source per check with a fixed priority chain, and VI came before DSP. VI was forced pending by an earlier experiment, but no VI handler was registered yet, so every check chose VI, found a NULL handler and gave up (52,881 times in one run). The DSP was never served.
 
 **Fix:** pick the highest-priority pending source **that has a handler**. The DSP interrupt now reaches `__DSPHandler`, the `DCD1 0000` mail is read and the init callback runs.
+</details>
+
+<details>
+<summary><b>An off-by-one-byte refcount</b></summary>
+
+#### An off-by-one-byte refcount
+
+Once audio was up, the engine crashed after calling through null function pointers. One object's vtable pointer read `0x0181AF48`; the real vtable is at `0x8081AF48` (its neighbours are the strings `"Default"` and `"Memory"`). A watchpoint showed the high byte changing inside `0x80446D40`, an atomic refcount increment:
+
+```asm
+lwarx  r4, 0, r3
+addi   r0, r4, 1
+stwcx. r0, 0, r3
+```
+
+In X-form instructions `rA = 0` means a literal 0, but the recompiler emitted `ctx.gpr[0] + ctx.gpr[3]`. With `r0 = 1` the new refcount was stored **one byte too far**, overwriting the top byte of the vtable pointer next to it. 564 `lwarx`, 564 `stwcx.` and 23 `sthbrx` in the game were affected, plus `stfiwx`, `lhbrx`, `lwbrx` and `stwbrx`.
+
+**Fix:** compute X-form addresses as `(rA|0) + rB` in the recompiler. While there, `dcbz` stopped being a stub and now zeroes its 32-byte block like the hardware does.
 </details>
 
 <details>
@@ -230,18 +249,9 @@ while (read_u8(0x807D43E6) != 5) {   // state struct 0x807D3D98 + 1614 (0x64E)
 
 The `0 → 5` transition depends on asynchronous callbacks from the Bluetooth stack (`/dev/usb/oh1/57e/305`). Those never arrive, because the HLE `IOCTLV` returns `0x8FFFFFFF`.
 
-**Workaround:** after 2000 polls, force the byte to `5`. This is a manual edit to the generated `output.cpp`, inside `func_805213CC`:
+**Workaround:** run with `NWII_FORCE_WPAD_READY=1`. After 2000 polls of that loop, the runtime forces the byte to `5`. This used to be a hand edit of the generated `output.cpp`, which every regeneration wiped; it now lives in the runtime.
 
-```cpp
-ctx.gpr[3] = ctx.mmu.read8(ctx.gpr[3] + 1614);
-{ static uint64_t force = 0;
-  if (++force > 2000 && ctx.gpr[3] != 5) {
-      ctx.mmu.write8(0x807D43E6, 5);
-      ctx.gpr[3] = 5;
-  } }
-```
-
-Regenerating the code wipes this edit. The proper fix is a Bluetooth (`oh1`) HLE that completes those requests.
+The proper fix is a Bluetooth (`oh1`) HLE that completes those requests.
 </details>
 
 <details>
@@ -266,6 +276,7 @@ Regenerating the code wipes this edit. The proper fix is a Bluetooth (`oh1`) HLE
   ```
 
 - **Rate-limited logs.** Guards like `if ((n++ % N) == 0)` hide most events. Remove them while you debug.
+- **Regeneration overwrites more than `output.cpp`.** It also rewrites `CMakeLists.txt` (dropping a hand-added `hle_shims.cpp`, which then fails at link time) and copies the top-level runtime over `build/recompiled/nWiiRuntime/`. Back up the generated runtime copy before regenerating.
 - **Edits to `output.cpp` are temporary.** Every regeneration replaces it. Prefer `[hle_hooks]` in the TOML or runtime-side fixes, and write down any manual edit so it can be reapplied.
 </details>
 
@@ -273,7 +284,7 @@ Regenerating the code wipes this edit. The proper fix is a Bluetooth (`oh1`) HLE
 
 | Phase | | Goal |
 |---|:---:|---|
-| **Bring-up** | 🚧 | Done: recompile, native build, Wii OS / IOS / DI / ES boot, SDL2 + OpenGL context, IRQ 27. Left: **engine start crash** ← current, first frame in the EFB, title screen, menus, gameplay |
+| **Bring-up** | 🚧 | Done: recompile, native build, Wii OS / IOS / DI / ES boot, SDL2 + OpenGL context, IRQ 27. Left: **first draw call** ← current, first frame in the EFB, title screen, menus, gameplay |
 | 1 · Correctness | 🔭 | Bluetooth / Wii Remote HLE (replaces the IOS workaround), audio (AI/DSP), saving, upstream the paired-singles and runtime patches |
 | 2 · Understanding | 🔭 | Symbol map and game structures, sharing what was already learned in [Ocean Crab](https://github.com/santiagoarce-rgb/OceanCrab) (same game, different port) |
 | 3 · Enhancements | 🔭 | In-game options menu, high resolution, widescreen, 60 FPS |
@@ -281,7 +292,7 @@ Regenerating the code wipes this edit. The proper fix is a Bluetooth (`oh1`) HLE
 
 ## Contributing
 
-Help is very welcome, especially with **the engine start crash** (thread resume at `0x8057247C`, null function pointers), IOS Bluetooth HLE, and GX rendering once frames start flowing. Read [`CONTRIBUTING.md`](CONTRIBUTING.md) first. It covers the commit style and the rule about never committing generated code or game data.
+Help is very welcome, especially with **GX FIFO parsing** (why no draw calls are recognized yet), IOS Bluetooth HLE, and GX rendering once frames start flowing. Read [`CONTRIBUTING.md`](CONTRIBUTING.md) first. It covers the commit style and the rule about never committing generated code or game data.
 
 General-purpose fixes to the recompiler and runtime are intended to go back upstream to [NWiiRecomp](https://github.com/BlackLineInteractive/NWiiRecomp).
 
