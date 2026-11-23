@@ -1,0 +1,471 @@
+diff --git a/nWiiRecomp/src/recompiler.cpp b/nWiiRecomp/src/recompiler.cpp
+index b8946e0..488f152 100644
+--- a/nWiiRecomp/src/recompiler.cpp
++++ b/nWiiRecomp/src/recompiler.cpp
+@@ -81,6 +81,12 @@ static bool is_hle_function(const std::string &name) {
+ }
+ 
+ 
++// X-form effective address: (rA|0) + rB. rA == 0 means a literal 0, not r0.
++static std::string x_ea(uint32_t rA, uint32_t rB) {
++  if (rA == 0) return "ctx.gpr[" + std::to_string(rB) + "]";
++  return "ctx.gpr[" + std::to_string(rA) + "] + ctx.gpr[" + std::to_string(rB) + "]";
++}
++
+ std::vector<std::string> Recompiler::generate_cpp(uint32_t entry_point) {
+   std::vector<std::string> generated_files;
+ 
+@@ -766,8 +772,9 @@ std::vector<std::string> Recompiler::generate_cpp(uint32_t entry_point) {
+     out << "                if (!found) std::exit(1);\n";
+     out << "            }\n";
+     out << "        }\n";
+-    out << "    }\n";
+-    out << "    std::cout << \"[DEBUG] PC History before 0x0:\\n\";\n";
++	out << "    } catch (...) { std::exit(1); }\n";
++	out << "    }\n";
++	out << "    std::cout << \"[DEBUG] PC History before 0x0:\\n\";\n";
+     out << "    for (int i=0; i<10; ++i) {\n";
+     out << "        std::cout << \"  0x\" << std::hex << "
+            "pc_history[(pc_history_idx + i) % 10] << \"\\n\";\n";
+@@ -1991,10 +1998,17 @@ void Recompiler::emit_instruction(std::ostream &out,
+             << "] > 0); ctx.cr[0].eq = (ctx.gpr[" << rA << "] == 0);\n";
+       }
+     } else if (xo == 792) {
+-      out << "    ctx.gpr[" << rA << "] = (uint32_t)((ctx.gpr[" << rB
+-          << "] & 0x20) ? ((int32_t)ctx.gpr[" << rS
+-          << "] >> 31) : ((int32_t)ctx.gpr[" << rS << "] >> (ctx.gpr[" << rB
+-          << "] & 0x1F))); // sraw\n";
++      // sraw rA, rS, rB. CA = 1 when rS is negative and any 1 bits are shifted out.
++      out << "    {\n";
++      out << "        int32_t sv = (int32_t)ctx.gpr[" << rS << "];\n";
++      out << "        uint32_t sh = ctx.gpr[" << rB << "] & 0x3F;\n";
++      out << "        uint32_t ca;\n";
++      out << "        if (sh >= 32) { ctx.gpr[" << rA
++          << "] = (sv < 0) ? 0xFFFFFFFFu : 0u; ca = (sv < 0) ? 1u : 0u; }\n";
++      out << "        else { ctx.gpr[" << rA << "] = (uint32_t)(sv >> sh);\n";
++      out << "            ca = (sv < 0 && sh != 0 && ((uint32_t)sv & ((1u << sh) - 1)) != 0) ? 1u : 0u; }\n";
++      out << "        ctx.xer = (ctx.xer & ~(1u << 29)) | (ca << 29);\n";
++      out << "    } // sraw\n";
+       if (ppc_inst.value() & 1) {
+         out << "    ctx.cr[0].lt = ((int32_t)ctx.gpr[" << rA
+             << "] < 0); ctx.cr[0].gt = ((int32_t)ctx.gpr[" << rA
+@@ -2180,11 +2194,10 @@ void Recompiler::emit_instruction(std::ostream &out,
+             << "] > 0); ctx.cr[0].eq = (ctx.gpr[" << rA << "] == 0);\n";
+       }
+     } else if (xo == 20) { 
+-      out << "    ctx.gpr[" << rD << "] = ctx.mmu.read32(ctx.gpr[" << rA
+-          << "] + ctx.gpr[" << rB << "]); // lwarx\n";
++      out << "    ctx.gpr[" << rD << "] = ctx.mmu.read32(" << x_ea(rA, rB) << "); // lwarx\n";
+     } else if (xo == 150) { 
+-      out << "    ctx.mmu.write32(ctx.gpr[" << rA << "] + ctx.gpr[" << rB
+-          << "], ctx.gpr[" << ppc_inst.rs() << "]); // stwcx\n";
++      out << "    ctx.mmu.write32(" << x_ea(rA, rB)
++          << ", ctx.gpr[" << ppc_inst.rs() << "]); // stwcx\n";
+       out << "    ctx.cr[0].eq = true; ctx.cr[0].lt = false; ctx.cr[0].gt = "
+              "false; // always succeed\n";
+     } else if (xo == 119) { 
+@@ -2326,23 +2339,25 @@ void Recompiler::emit_instruction(std::ostream &out,
+           << "], ctx.fpr[" << ppc_inst.rs() << "]); // stfdux\n";
+       out << "    ctx.gpr[" << rA << "] += ctx.gpr[" << rB << "];\n";
+     } else if (xo == 983) { 
+-      out << "    ctx.mmu.write32(ctx.gpr[" << rA << "] + ctx.gpr[" << rB
+-          << "], (uint32_t)(int32_t)ctx.fpr[" << ppc_inst.rs()
++      out << "    ctx.mmu.write32(" << x_ea(rA, rB)
++          << ", (uint32_t)(int32_t)ctx.fpr[" << ppc_inst.rs()
+           << "]); // stfiwx\n";
+     } else if (xo == 790) { 
+-      out << "    { uint16_t v = ctx.mmu.read16(ctx.gpr[" << rA
+-          << "] + ctx.gpr[" << rB << "]); ctx.gpr[" << rD
++      out << "    { uint16_t v = ctx.mmu.read16(" << x_ea(rA, rB)
++          << "); ctx.gpr[" << rD
+           << "] = ((v&0xFF)<<8)|((v>>8)&0xFF); } // lhbrx\n";
+     } else if (xo == 534) { 
+-      out << "    { uint32_t v = ctx.mmu.read32(ctx.gpr[" << rA
+-          << "] + ctx.gpr[" << rB << "]); ctx.gpr[" << rD
++      out << "    { uint32_t v = ctx.mmu.read32(" << x_ea(rA, rB)
++          << "); ctx.gpr[" << rD
+           << "] = __builtin_bswap32(v); } // lwbrx\n";
+     } else if (xo == 662) { 
+-      out << "    ctx.mmu.write32(ctx.gpr[" << rA << "] + ctx.gpr[" << rB
+-          << "], __builtin_bswap32(ctx.gpr[" << ppc_inst.rs()
++      out << "    ctx.mmu.write32(" << x_ea(rA, rB)
++          << ", __builtin_bswap32(ctx.gpr[" << ppc_inst.rs()
+           << "])); // stwbrx\n";
+     } else if (xo == 1014) { 
+-      out << "    // dcbz (data cache block zero) - stub\n";
++      // dcbz zeroes the 32-byte block containing EA.
++      out << "    { uint32_t ea = (" << x_ea(rA, rB)
++          << ") & ~31u; for (int i = 0; i < 32; i += 4) ctx.mmu.write32(ea + i, 0); } // dcbz\n";
+     } else if (xo == 55) { 
+       out << "    { uint32_t ea = ctx.gpr[" << rA << "] + ctx.gpr[" << rB
+           << "]; ";
+@@ -2356,8 +2371,8 @@ void Recompiler::emit_instruction(std::ostream &out,
+       out << "        ctx.gpr[" << rA << "] = ea;\n";
+       out << "    } // stwux\n";
+     } else if (xo == 918) { 
+-      out << "    ctx.mmu.write16(ctx.gpr[" << rA << "] + ctx.gpr[" << rB
+-          << "], ((ctx.gpr[" << ppc_inst.rs() << "] & 0xFF) << 8) | ((ctx.gpr["
++      out << "    ctx.mmu.write16(" << x_ea(rA, rB)
++          << ", ((ctx.gpr[" << ppc_inst.rs() << "] & 0xFF) << 8) | ((ctx.gpr["
+           << ppc_inst.rs() << "] >> 8) & 0xFF)); // sthbrx\n";
+     } else if (xo == 595 || xo == 210) { 
+       out << "    // mfsr/mtsr stub\n";
+@@ -2422,16 +2437,21 @@ void Recompiler::emit_instruction(std::ostream &out,
+     out << "    ctx.gpr[" << ppc_inst.rd() << "] = (uint32_t)((int32_t)ctx.gpr["
+         << ppc_inst.ra() << "] * " << ppc_inst.simm() << "); // mulli\n";
+   } else if (ppc_inst.opcode() == 8) { 
+-    out << "    ctx.gpr[" << ppc_inst.rd() << "] = (uint32_t)("
+-        << ppc_inst.simm() << " - (int32_t)ctx.gpr[" << ppc_inst.ra()
+-        << "]); // subfic\n";
++    out << "    {\n";
++    out << "        uint64_t res = (uint64_t)(uint32_t)~ctx.gpr[" << ppc_inst.ra()
++        << "] + " << (uint32_t)ppc_inst.simm() << "ull + 1;\n";
++    out << "        ctx.gpr[" << ppc_inst.rd() << "] = (uint32_t)res;\n";
++    out << "        ctx.xer = (ctx.xer & ~(1u << 29)) | ((uint32_t)((res >> 32) & 1) << 29);\n";
++    out << "    } // subfic\n";
+   } else if (ppc_inst.opcode() == 12) { 
+     uint32_t rD = ppc_inst.rd();
+     uint32_t rA = ppc_inst.ra();
+     int32_t simm = ppc_inst.simm();
+     out << "    {\n";
+-    out << "        uint64_t res = (uint64_t)ctx.gpr[" << rA << "] + " << simm
+-        << ";\n";
++    // The carry comes from the 32-bit add, so zero-extend the immediate:
++    // `x + -1` must carry for every x != 0.
++    out << "        uint64_t res = (uint64_t)ctx.gpr[" << rA << "] + "
++        << (uint32_t)simm << "ull;\n";
+     out << "        ctx.gpr[" << rD << "] = (uint32_t)res;\n";
+     out << "        ctx.xer = (ctx.xer & ~(1 << 29)) | (((res >> 32) & 1) << "
+            "29); // CA\n";
+@@ -2441,8 +2461,10 @@ void Recompiler::emit_instruction(std::ostream &out,
+     uint32_t rA = ppc_inst.ra();
+     int32_t simm = ppc_inst.simm();
+     out << "    {\n";
+-    out << "        uint64_t res = (uint64_t)ctx.gpr[" << rA << "] + " << simm
+-        << ";\n";
++    // The carry comes from the 32-bit add, so zero-extend the immediate:
++    // `x + -1` must carry for every x != 0.
++    out << "        uint64_t res = (uint64_t)ctx.gpr[" << rA << "] + "
++        << (uint32_t)simm << "ull;\n";
+     out << "        ctx.gpr[" << rD << "] = (uint32_t)res;\n";
+     out << "        ctx.xer = (ctx.xer & ~(1 << 29)) | (((res >> 32) & 1) << "
+            "29); // CA\n";
+@@ -2509,6 +2531,20 @@ void Recompiler::emit_instruction(std::ostream &out,
+     } else if (xo == 23) {
+       out << "    ctx.ps_sel(" << frD << ", " << frA << ", " << frC << ", "
+           << frB << ");\n";
++          } else if (xo == 6) {
++            uint32_t W = (inst.opcode >> 10) & 0x1;
++            uint32_t I = (inst.opcode >> 7) & 0x7;
++            out << "    { uint32_t addr = "
++                << (frA == 0 ? std::string("0") : ("ctx.gpr[" + std::to_string(frA) + "]"))
++                << " + ctx.gpr[" << frB << "]; ctx.psq_load(" << frD << ", addr, "
++                << W << ", " << I << "); } // psq_lx\n";
++          } else if (xo == 7) {
++            uint32_t W = (inst.opcode >> 10) & 0x1;
++            uint32_t I = (inst.opcode >> 7) & 0x7;
++            out << "    { uint32_t addr = "
++                << (frA == 0 ? std::string("0") : ("ctx.gpr[" + std::to_string(frA) + "]"))
++                << " + ctx.gpr[" << frB << "]; ctx.psq_store(" << frD << ", addr, "
++                << W << ", " << I << "); } // psq_stx\n";
+     } else if (xo_10 == 72) {
+       out << "    ctx.ps_mr(" << frD << ", " << frB << ");\n";
+     } else if (xo_10 == 40) {
+diff --git a/nWiiRuntime/src/core/os_hle_stubs.cpp b/nWiiRuntime/src/core/os_hle_stubs.cpp
+index 183b710..9f30a06 100644
+--- a/nWiiRuntime/src/core/os_hle_stubs.cpp
++++ b/nWiiRuntime/src/core/os_hle_stubs.cpp
+@@ -75,6 +75,27 @@ void note_null_call(uint32_t site, uint32_t lr) {
+   if (n++ < 20)
+     std::cout << "[NullCall] no-op call through null ptr at site 0x" << std::hex
+               << site << " lr=0x" << lr << std::dec << "\n";
++  static const bool dump = std::getenv("NWII_NULLDUMP") != nullptr;
++  if (dump && n <= 20 && g_ctx_ptr) {
++    CPUContext &c = *g_ctx_ptr;
++    std::cout << std::hex << "  regs r3=0x" << c.gpr[3] << " r4=0x" << c.gpr[4]
++              << " r5=0x" << c.gpr[5] << " r6=0x" << c.gpr[6] << " r30=0x" << c.gpr[30]
++              << " r31=0x" << c.gpr[31] << " r1=0x" << c.gpr[1] << "\n";
++    for (int r : {3, 4, 5, 6}) {
++      uint32_t a = c.gpr[r];
++      if ((a & 0xF0000000) != 0x80000000 && (a & 0xF0000000) != 0x90000000) continue;
++      std::cout << "  [r" << std::dec << r << "]" << std::hex;
++      for (int i = 0; i < 4; ++i) std::cout << " " << c.mmu.read32(a + i * 4);
++      std::cout << "\n";
++    }
++    uint32_t sp = c.gpr[1];
++    std::cout << "  stack lr chain:";
++    for (int i = 0; i < 8 && (sp & 0xF0000000) >= 0x80000000 && (sp & 0xF0000000) <= 0x90000000; ++i) {
++      std::cout << " " << c.mmu.read32(sp + 4);
++      sp = c.mmu.read32(sp);
++    }
++    std::cout << std::dec << "\n";
++  }
+ }
+ 
+ void trace_call(uint32_t func_addr, CPUContext &ctx) {
+diff --git a/nWiiRuntime/src/hle/ios.cpp b/nWiiRuntime/src/hle/ios.cpp
+index 7291c84..b9d9892 100644
+--- a/nWiiRuntime/src/hle/ios.cpp
++++ b/nWiiRuntime/src/hle/ios.cpp
+@@ -663,13 +663,23 @@ bool handle_syscall(CPUContext &ctx) {
+   case 0x6C:
+     IOS_IoctlvAsync(ctx);
+     break;
+-  default:
+-
+-    
++  default: {
++  // The SDK issues a plain `sc` after cache maintenance (DCFlushRange etc.) as a
++  // sync. That is expected and very frequent, so log only the first few.
++  static uint64_t sc_unhandled = 0;
++  if (++sc_unhandled <= 20)
++  std::cerr << "[SC unhandled] id=0x" << std::hex << syscall_id
++            << " r3=0x" << ctx.gpr[3]
++            << " r4=0x" << ctx.gpr[4]
++            << " r5=0x" << ctx.gpr[5]
++            << " pc=0x" << ctx.pc
++            << std::dec << "\n";
++  
+     if (process_pending_callbacks(ctx))
+       return true;
+     break;
+   }
++  }
+ 
+   ctx.pc = old_pc; 
+   return false;
+@@ -1008,6 +1018,7 @@ bool process_pending_callbacks(CPUContext &ctx) {
+   if (ctx.in_callback && ctx.pc == 0xFFFFFFFC) {
+     
+     ctx.in_callback = false;
++        if (std::getenv("NWII_SAMPLE")) std::cerr << "[CbOut] depth=" << std::dec << ctx.callback_depth << " pc=0x" << std::hex << ctx.pc << std::dec << "\n";
+   }
+ 
+   if (ctx.in_callback) {
+@@ -1283,17 +1294,25 @@ bool process_pending_callbacks(CPUContext &ctx) {
+               int os_intr = -1;
+               uint32_t bit_to_clear = 0;
+               
+-              if      (active_ints & 0x00004000) { os_intr = 27; bit_to_clear = 0x00004000; } 
+-              else if (active_ints & 0x00000100) { os_intr = 24; bit_to_clear = 0x00000100; } 
+-              else if (active_ints & 0x00000004) { os_intr = 21; bit_to_clear = 0x00000004; } 
+-              else if (active_ints & 0x00000008) { os_intr = 20; bit_to_clear = 0x00000008; } 
+-              else if (active_ints & 0x00000010) { os_intr =  9; bit_to_clear = 0x00000010; } 
+-
+-              else if (active_ints & 0x00000040) { os_intr = nwii::runtime::hw::dsp_pending_os_interrupt(); bit_to_clear = 0x00000040; } 
+-              else if (active_ints & 0x00000020) { os_intr =  8; bit_to_clear = 0x00000020; } 
+-              else if (active_ints & 0x00000400) { os_intr = 19; bit_to_clear = 0x00000400; } 
+-              else if (active_ints & 0x00000200) { os_intr = 18; bit_to_clear = 0x00000200; } 
+-              else if (active_ints & 0x00000800) { os_intr = 17; bit_to_clear = 0x00000800; } 
++              // Pick the highest-priority pending source that has a handler.
++              // A source with a NULL handler (e.g. VI before VIInit registers
++              // one) must not starve the others behind it.
++              {
++                  struct Src { uint32_t bit; int intr; };
++                  const Src order[] = {
++                      {0x00004000, 27}, {0x00000100, 24}, {0x00000004, 21},
++                      {0x00000008, 20}, {0x00000010,  9}, {0x00000040, -2},
++                      {0x00000020,  8}, {0x00000400, 19}, {0x00000200, 18},
++                      {0x00000800, 17},
++                  };
++                  for (const Src& s : order) {
++                      if (!(active_ints & s.bit)) continue;
++                      int intr = s.intr == -2 ? nwii::runtime::hw::dsp_pending_os_interrupt() : s.intr;
++                      uint32_t h = ctx.mmu.read32(0x80003040 + intr * 4);
++                      if (os_intr == -1) { os_intr = intr; bit_to_clear = s.bit; }
++                      if (h != 0 && h != 0xFFFFFFFF) { os_intr = intr; bit_to_clear = s.bit; break; }
++                  }
++              }
+ 
+               if (os_intr != -1) {
+                   uint32_t handler = ctx.mmu.read32(0x80003040 + os_intr * 4);
+@@ -1307,13 +1326,16 @@ bool process_pending_callbacks(CPUContext &ctx) {
+                                         << ctx.pc << std::dec << "\n";
+                       }
+                       
+-                      static uint32_t vi_dispatch_count = 0;
+-                      if (os_intr != 24 && (vi_dispatch_count++ % 256) == 0) {
+-                          std::cout << "[HLE PI] Dispatching interrupt "
+-                                    << std::dec << os_intr << " to handler 0x"
+-                                    << std::hex << handler << " r1=0x"
+-                                    << ctx.gpr[1] << " pc=0x" << ctx.pc
+-                                    << std::dec << std::endl;
++                      uint32_t dbg_current_ctx = ctx.mmu.read32(0x800000D4);
++                                    if (os_intr != 24) {
++                                        std::cout << "[HLE PI] Dispatching interrupt "
++                                                  << std::dec << os_intr << " to handler 0x"
++                                                  << std::hex << handler << " current_ctx=0x"
++                                                  << dbg_current_ctx << " pi_intsr=0x"
++                                                  << nwii::runtime::hw::pi_intsr
++                                                  << " r1=0x" << ctx.gpr[1] << " pc=0x" << ctx.pc
++                                                  << std::dec << std::endl;
++                                    
+                       }
+                       if (std::getenv("NWII_SAMPLE")) {
+                           static uint64_t census[32] = {0};
+@@ -1372,6 +1394,7 @@ bool process_pending_callbacks(CPUContext &ctx) {
+                       ctx.backup_stack.push(bk);
+ 
+                       ctx.in_callback = true;
++                          if (std::getenv("NWII_SAMPLE")) std::cerr << "[CbIn/IRQ] irq=" << std::dec << os_intr << " handler=0x" << std::hex << handler << " depth=" << std::dec << ctx.callback_depth << " pc=0x" << std::hex << ctx.pc << std::dec << "\n";
+                       ctx.callback_depth++;
+                       ctx.srr0 = ctx.pc;
+                       ctx.srr1 = ctx.msr | 0x8000;
+@@ -1458,6 +1481,7 @@ bool process_pending_callbacks(CPUContext &ctx) {
+   ctx.backup_stack.push(bk);
+ 
+   ctx.in_callback = true;
++      if (std::getenv("NWII_SAMPLE")) std::cerr << "[CbIn/CB] cb=0x" << std::hex << cb.cb_addr << " depth=" << std::dec << ctx.callback_depth << " pc=0x" << std::hex << ctx.pc << std::dec << "\n";
+   ctx.callback_depth++;
+ 
+   ctx.gpr[3] = cb.arg1;
+diff --git a/nWiiRuntime/src/hw/hw_ai.cpp b/nWiiRuntime/src/hw/hw_ai.cpp
+index ad1626d..63c2bc3 100644
+--- a/nWiiRuntime/src/hw/hw_ai.cpp
++++ b/nWiiRuntime/src/hw/hw_ai.cpp
+@@ -6,67 +6,100 @@
+ #include <algorithm>
+ 
+ namespace nwii::runtime {
+-    extern uint64_t get_os_time();
++    extern uint64_t get_os_time(); // microseconds
+ }
+ 
+ namespace nwii::runtime::hw {
+ 
++// AICR (0xCC006C00) bit layout, per the GameCube/Wii hardware documentation.
++enum : uint32_t {
++    AICR_PSTAT    = 0x01, // 1 = streaming sample counter runs
++    AICR_AISFR    = 0x02, // AIS sample rate: 0 = 32 kHz, 1 = 48 kHz
++    AICR_AIINTMSK = 0x04, // 1 = AI interrupt enabled
++    AICR_AIINT    = 0x08, // interrupt status; write 1 to clear
++    AICR_AIINTVLD = 0x10,
++    AICR_SCRESET  = 0x20, // write-only strobe: reset the sample counter
++    AICR_AIDFR    = 0x40, // DSP sample rate
++};
++constexpr uint32_t AICR_STORED = AICR_PSTAT | AICR_AISFR | AICR_AIINTMSK | AICR_AIINTVLD | AICR_AIDFR;
++constexpr uint32_t PI_INT_AI = 0x20;
++
+ static uint32_t ai_cr = 0;
+ static uint32_t ai_vr = 0;
+-static uint32_t ai_scnt = 0;
++static uint32_t ai_scnt_base = 0;   // counter value at ai_start_time
++static uint64_t ai_start_time = 0;  // host microseconds
+ static uint32_t ai_it = 0;
+-static uint64_t ai_start_time = 0;
++static uint32_t ai_last_scnt = 0;   // last value checked against AIIT
++
++static uint32_t ai_rate() { return (ai_cr & AICR_AISFR) ? 48000 : 32000; }
++
++static uint32_t ai_current_scnt() {
++    if (!(ai_cr & AICR_PSTAT)) return ai_scnt_base;
++    uint64_t elapsed = nwii::runtime::get_os_time() - ai_start_time;
++    return ai_scnt_base + (uint32_t)((elapsed * ai_rate()) / 1000000);
++}
++
++// Re-anchor the counter so a rate or run-state change does not make it jump.
++static void ai_rebase() {
++    ai_scnt_base = ai_current_scnt();
++    ai_start_time = nwii::runtime::get_os_time();
++}
++
++static void ai_update_interrupts() {
++    if ((ai_cr & AICR_AIINT) && (ai_cr & AICR_AIINTMSK)) trigger_pi_interrupt(PI_INT_AI);
++    else clear_pi_interrupt(PI_INT_AI);
++}
++
++static uint32_t ai_tick() {
++    uint32_t cur = ai_current_scnt();
++    // Raise AIINT when the counter crosses AIIT (wrap-safe).
++    if (ai_it != 0 && cur != ai_last_scnt && (uint32_t)(ai_it - ai_last_scnt) <= (uint32_t)(cur - ai_last_scnt)) {
++        ai_cr |= AICR_AIINT;
++        ai_update_interrupts();
++    }
++    ai_last_scnt = cur;
++    return cur;
++}
+ 
+-void register_ai(MMIODispatcher& dispatcher) {{
++void register_ai(MMIODispatcher& dispatcher) {
+     dispatcher.register_region(0xCC006C00, 0xCC006CFF,
+         [](uint32_t addr) -> uint32_t {
+-
+-            
+-            uint32_t cur_scnt = ai_scnt;
+-            if (ai_cr & 0x20) {
+-                uint64_t current = nwii::runtime::get_os_time();
+-                uint32_t samples = ((current - ai_start_time) * 48) / 1000;
+-                cur_scnt = ai_scnt + samples;
+-                if (ai_it > 0 && cur_scnt >= ai_it) {
+-                    ai_cr |= 0x04;
+-                    if (ai_cr & 0x02) trigger_pi_interrupt(0x20);
+-                }
++            uint32_t scnt = ai_tick();
++            switch (addr) {
++            case 0xCC006C00: return ai_cr;
++            case 0xCC006C04: return ai_vr;
++            case 0xCC006C08: return scnt;
++            case 0xCC006C0C: return ai_it;
++            default: return 0;
+             }
+-            if (addr == 0xCC006C00) return ai_cr;
+-            if (addr == 0xCC006C04) return ai_vr;
+-            if (addr == 0xCC006C08) return cur_scnt;
+-            if (addr == 0xCC006C0C) return ai_it;
+-            return 0;
+         },
+         [](uint32_t addr, uint32_t val) {
+-            if (addr == 0xCC006C00) {
+-                if (val & 0x04) { ai_cr &= ~0x04; clear_pi_interrupt(0x20); }
+-                if (val & 0x08) { ai_scnt = 0; ai_start_time = nwii::runtime::get_os_time(); }
+-                if ((val & 0x20) && !(ai_cr & 0x20)) { ai_start_time = nwii::runtime::get_os_time(); }
+-                ai_cr = (ai_cr & 0x04) | (val & ~0x04);
+-            } else if (addr == 0xCC006C04) {
+-                ai_vr = val;
+-            } else if (addr == 0xCC006C08) {
+-                ai_scnt = val;
++            switch (addr) {
++            case 0xCC006C00: {
++                ai_rebase();
++                if (val & AICR_SCRESET) { ai_scnt_base = 0; ai_last_scnt = 0; }
++                uint32_t aiint = (val & AICR_AIINT) ? 0 : (ai_cr & AICR_AIINT);
++                ai_cr = (val & AICR_STORED) | aiint;
++                ai_update_interrupts();
++                break;
++            }
++            case 0xCC006C04: ai_vr = val; break;
++            case 0xCC006C08:
++                ai_scnt_base = val;
++                ai_last_scnt = val;
+                 ai_start_time = nwii::runtime::get_os_time();
+-            } else if (addr == 0xCC006C0C) {
+-                ai_it = val;
++                break;
++            case 0xCC006C0C: ai_it = val; break;
+             }
+         }
+     );
+-}}
+-
+-} 
+-namespace nwii::runtime::hw {
+-void ai_update() {
+-    if (ai_cr & 0x20) {
+-        uint64_t current = nwii::runtime::get_os_time();
+-        uint32_t samples = ((current - ai_start_time) * 48) / 1000;
+-        uint32_t cur_scnt = ai_scnt + samples;
+-        if (ai_it > 0 && cur_scnt >= ai_it) {
+-            ai_cr |= 0x04;
+-            if (ai_cr & 0x02) trigger_pi_interrupt(0x20);
+-        }
+-    }
++    // On Wii the game reaches AI through the Hollywood mirror at 0xCD006C00.
++    dispatcher.register_region(0xCD006C00, 0xCD006CFF,
++        [&dispatcher](uint32_t a) { return dispatcher.read32(a ^ 0x01000000); },
++        [&dispatcher](uint32_t a, uint32_t v) { dispatcher.write32(a ^ 0x01000000, v); }
++    );
+ }
++
++void ai_update() { ai_tick(); }
++
+ }

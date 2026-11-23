@@ -1,0 +1,393 @@
+--- a/nWiiRuntime/src/core/main.cpp
++++ b/nWiiRuntime/src/core/main.cpp
+@@ -43,10 +43,18 @@
+   nwii::runtime::g_ctx_ptr = ctx;
+   std::cout << "[Thread] CPU Core started. pc=" << std::hex << ctx->pc << " is_running=" << ctx->is_running << std::endl;
+   std::flush(std::cout);
+-  run_game(*ctx);
+ 
+-  
+-  
++  for (;;) {
++    int jmp_ret = setjmp(ctx->exception_jmp_buf);
++    if (jmp_ret != 0) {
++      // Volvemos de longjmp: ctx.pc ya apunta al handler, ctx.lr=0xFFFFFFFC.
++    }
++
++    run_game(*ctx);
++
++    if (!ctx->is_running) break;
++  }
++
+   if (!ctx->is_running) {
+     std::cout << "[Thread] CPU Core exited: shutdown requested (window closed "
+                  "or quit). NOT a crash." << std::endl;
+@@ -732,4 +740,4 @@
+ 
+   nwii::runtime::shutdown();
+   return 0;
+-}
+\ No hay ningún carácter de nueva línea al final del archivo
++}
+--- a/nWiiRuntime/src/core/os_hle_stubs.cpp
++++ b/nWiiRuntime/src/core/os_hle_stubs.cpp
+@@ -103,8 +103,29 @@
+   std::cout << "[CALL] 0x" << std::hex << func_addr << " lr=0x" << ctx.lr
+             << " r3=0x" << ctx.gpr[3] << " r4=0x" << ctx.gpr[4] << " r5=0x"
+             << ctx.gpr[5] << " r6=0x" << ctx.gpr[6] << " r7=0x" << ctx.gpr[7]
+-            << " r13=0x" << ctx.gpr[13] << " r1=0x" << ctx.gpr[1]
+-            << std::dec << "\n";
++            << " r13=0x" << ctx.gpr[13] << " r1=0x" << ctx.gpr[1];
++  // NWII_TRACE_STR=1: also print r3 as a guest C string (e.g. DVDOpen paths).
++  static const bool str = std::getenv("NWII_TRACE_STR") != nullptr;
++  if (str && ctx.gpr[3] >= 0x80000000u && ctx.gpr[3] < 0x94000000u) {
++    std::cout << " str=\"";
++    for (uint32_t a = ctx.gpr[3], i = 0; i < 128; ++i, ++a) {
++      uint8_t ch = ctx.mmu.read8(a);
++      if (!ch) break;
++      std::cout << (char)((ch >= 32 && ch < 127) ? ch : '?');
++    }
++    std::cout << "\"";
++  }
++  static const bool stk = std::getenv("NWII_TRACE_STACK") != nullptr;
++  if (stk) {
++    std::cout << std::hex << " stack:";
++    uint32_t sp = ctx.gpr[1];
++    for (int i = 0; i < 14 && sp >= 0x80000000u && sp < 0x94000000u; ++i) {
++      sp = ctx.mmu.read32(sp);
++      if (sp < 0x80000000u || sp >= 0x94000000u) break;
++      std::cout << " " << ctx.mmu.read32(sp + 4);
++    }
++  }
++  std::cout << std::dec << "\n";
+ }
+ } 
+ 
+@@ -218,7 +239,10 @@
+ extern "C" void VIInit(CPUContext &ctx) {
+   std::cout << "[HLE VIInit] Triggered at PC=0x" << std::hex << ctx.pc
+             << std::dec << "\n";
+-  
++
++  nwii::runtime::hw::pi_intmr |= 0x00000100;
++  std::cout << "[HLE VIInit] Unmasked VI interrupt, pi_intmr=0x" << std::hex
++            << nwii::runtime::hw::pi_intmr << std::dec << "\n";
+ }
+ 
+ extern "C" void VIConfigure(CPUContext &ctx) {
+@@ -245,4 +269,4 @@
+ extern "C" void VIWaitForRetrace(CPUContext &ctx) {
+ 
+   nwii::runtime::hw::vi_trigger_interrupt();
+-}
+\ No hay ningún carácter de nueva línea al final del archivo
++}
+--- a/nWiiRuntime/src/hle/gx.cpp
++++ b/nWiiRuntime/src/hle/gx.cpp
+@@ -365,6 +365,16 @@
+     if ((base & 0x03FFFFFF) == (cp_base & 0x03FFFFFF))
+         return false; 
+     if (!nwii::runtime::g_mmu) return false;
++    if (std::getenv("NWII_FIFOTRACE")) {
++        static uint64_t redirected = 0; static uint32_t last_base = 0;
++        ++redirected;
++        if (base != last_base || (redirected % 20000) == 0) {
++            std::cout << "[FIFO] redirect to base=0x" << std::hex << base << " end=0x" << end
++                      << " wptr=0x" << wptr << " (cp_base=0x" << cp_base << ") total="
++                      << std::dec << redirected << "\n";
++            last_base = base;
++        }
++    }
+     nwii::runtime::g_mmu->write8(0x80000000u | (wptr & 0x01FFFFFFu), b);
+     wptr += 1;
+     if ((wptr & 0x03FFFFFF) > (end & 0x03FFFFFF))
+--- a/nWiiRuntime/src/hle/ios.cpp
++++ b/nWiiRuntime/src/hle/ios.cpp
+@@ -607,10 +607,7 @@
+ 
+   std::cout << "[HW IPC] cmd=" << cmd << " virt=0x" << std::hex << virt_addr
+             << " -> result=" << (int32_t)result << std::dec << std::endl;
+-
+-  if (result != -0x70000001) { 
+-      nwii::runtime::g_mmu->write32(virt_addr + 4, (uint32_t)(int32_t)result);
+-  }
++  nwii::runtime::g_mmu->write32(virt_addr + 4, (uint32_t)(int32_t)result);
+   return result;
+ }
+ 
+@@ -761,6 +758,13 @@
+     return false;
+   for (int i = 0; i < 32; i++)
+     ctx.gpr[i] = ctx.mmu.read32(c + i * 4);
++  if (std::getenv("NWII_R13WATCH") && (ctx.gpr[13] & 0xFF000000) != 0x80000000) {
++    static int n = 0;
++    if (n++ < 12)
++      std::cout << "[R13] load_context ctx=0x" << std::hex << c << " r13=0x" << ctx.gpr[13]
++                << " r1=0x" << ctx.gpr[1] << " srr0=0x" << ctx.mmu.read32(c + 0x198)
++                << std::dec << "\n";
++  }
+   uint32_t cr_val = ctx.mmu.read32(c + 0x80);
+   for (int i = 0; i < 8; i++) {
+     uint32_t nib = (cr_val >> (28 - i * 4)) & 0xF;
+@@ -796,6 +800,28 @@
+ int g_trace_after_dec = 0;
+ 
+ bool process_pending_callbacks(CPUContext &ctx) {
++if (ctx.pc == 0x8050E604) {
++    static int spin_dbg = 0;
++    if (spin_dbg++ < 20 && std::getenv("NWII_SAMPLE")) {
++      std::cerr << "[SpinDbg] msr=0x" << std::hex << ctx.msr
++                << " in_cb=" << std::dec << ctx.in_callback
++                << " cb_depth=" << ctx.callback_depth
++                << " intsr=0x" << std::hex << nwii::runtime::hw::pi_intsr
++                << " intmr=0x" << nwii::runtime::hw::pi_intmr
++                << " active=0x" << (nwii::runtime::hw::pi_intsr & nwii::runtime::hw::pi_intmr)
++                << std::dec << "\n";
++    }
++    if (!(ctx.msr & 0x8000)) {
++      ctx.msr |= 0x8000;
++    }
++    if (ctx.dispatch_saved_ctx != 0) {
++      static int clear_saved = 0;
++      if (clear_saved++ < 3 && std::getenv("NWII_SAMPLE"))
++        std::cerr << "[SpinDbg] clearing dispatch_saved_ctx=0x"
++                  << std::hex << ctx.dispatch_saved_ctx << std::dec << "\n";
++      ctx.dispatch_saved_ctx = 0;
++    }    
++  }
+ 
+   
+   if (std::getenv("NWII_SAMPLE")) {
+@@ -820,6 +846,52 @@
+       }
+   }
+ 
++  // NWII_FORCE_WPAD_READY=1 (SpongeBob ToS R8IE78 only): the game polls an IOS
++  // state byte at 0x807D43E6 until it reaches 5. That needs Bluetooth (oh1)
++  // callbacks the HLE does not deliver yet, so force it after a while. This
++  // replaces the old hand edit of output.cpp, which every regeneration lost.
++  {
++    static const bool force = std::getenv("NWII_FORCE_WPAD_READY") != nullptr;
++    static uint32_t polls = 0;
++    if (force && ctx.pc >= 0x805189A0 && ctx.pc <= 0x805189B0 &&
++        ctx.mmu.read8(0x807D43E6) != 5 && ++polls > 2000) {
++      ctx.mmu.write8(0x807D43E6, 5);
++      std::cout << "[WPAD] forced IOS state byte 0x807D43E6 to 5\n";
++    }
++  }
++
++  // NWII_WATCH=<hex addr>: report changes of one guest word, with the PC nearby.
++  {
++    static const uint32_t waddr = []() -> uint32_t {
++      const char *e = std::getenv("NWII_WATCH");
++      return e ? (uint32_t)std::strtoul(e, nullptr, 16) : 0;
++    }();
++    static uint32_t last = 0; static int n = 0;
++    if (waddr && n < 20) {
++      uint32_t v = ctx.mmu.read32(waddr);
++      if (v != last) {
++        ++n;
++        std::cout << "[Watch] 0x" << std::hex << waddr << ": 0x" << last << " -> 0x" << v
++                  << " pc=0x" << ctx.pc << " lr=0x" << ctx.lr << " r1=0x" << ctx.gpr[1]
++                  << " r3=0x" << ctx.gpr[3] << std::dec << "\n";
++        last = v;
++      }
++    }
++  }
++
++  // NWII_R13WATCH: report the first places where the SDA base r13 changes.
++  {
++    static const bool r13watch = std::getenv("NWII_R13WATCH") != nullptr;
++    static uint32_t last = 0; static int n = 0;
++    if (r13watch && ctx.gpr[13] != last && n < 12) {
++      ++n;
++      std::cout << "[R13] periodic: r13 0x" << std::hex << last << " -> 0x" << ctx.gpr[13]
++                << " pc=0x" << ctx.pc << " lr=0x" << ctx.lr << " r1=0x" << ctx.gpr[1]
++                << " curctx=0x" << ctx.mmu.read32(0x800000D4) << std::dec << "\n";
++      last = ctx.gpr[13];
++    }
++  }
++
+   {
+     static uint32_t trace_pc = []() -> uint32_t {
+       const char *e = std::getenv("NWII_LOOPTRACE");
+@@ -840,8 +912,23 @@
+     static bool sample = std::getenv("NWII_SAMPLE") != nullptr;
+     static uint64_t n = 0;
+     if (sample && (++n % 400000) == 0)
++    {
+       std::cout << "[Sample] pc=0x" << std::hex << ctx.pc << " lr=0x" << ctx.lr
+-                << " r3=0x" << ctx.gpr[3] << std::dec << "\n";
++                << " r3=0x" << ctx.gpr[3] << " r28=0x" << ctx.gpr[28] << " r29=0x" << ctx.gpr[29]
++                << " r30=0x" << ctx.gpr[30] << " r31=0x" << ctx.gpr[31];
++      // NWII_STACKSAMPLE=1: append the guest return-address chain.
++      static const bool stack = std::getenv("NWII_STACKSAMPLE") != nullptr;
++      if (stack) {
++        uint32_t sp = ctx.gpr[1];
++        std::cout << " stack:";
++        for (int i = 0; i < 12 && sp >= 0x80000000u && sp < 0x94000000u; ++i) {
++          sp = ctx.mmu.read32(sp);
++          if (sp < 0x80000000u || sp >= 0x94000000u) break;
++          std::cout << " " << ctx.mmu.read32(sp + 4);
++        }
++      }
++      std::cout << std::dec << "\n";
++    }
+   }
+ 
+   
+@@ -1005,15 +1092,22 @@
+   nwii::runtime::hw::di_tick();
+ 
+   if (ctx.vblank_pending) {
++      static int vb_dbg = 0;
++      vb_dbg++;
++      if (vb_dbg < 20 || (vb_dbg % 500) == 0) {
++          std::cout << "[VBcheck] #" << vb_dbg << " in_callback=" << ctx.in_callback
++                    << " msr=0x" << std::hex << ctx.msr << std::dec
++                    << " pc=0x" << std::hex << ctx.pc << std::dec << "\n";
++      }
+       if (!ctx.in_callback && (ctx.msr & 0x8000)) {
+-          ctx.vblank_pending = false;
+-          nwii::runtime::hw::vi_trigger_interrupt();
++        ctx.vblank_pending = false;
++        nwii::runtime::hw::vi_trigger_interrupt();
+ 
+-          
+-          
+-          hle_drive_thread_queue(ctx);
+-      }
+-  }
++
++
++        hle_drive_thread_queue(ctx);
++    }
++}
+ 
+   if (ctx.in_callback && ctx.pc == 0xFFFFFFFC) {
+     
+@@ -1067,7 +1161,27 @@
+       nwii::runtime::EventScheduler::get().advance(ctx, ctx.read_timebase());
+   }
+ 
+-  
++  // ═══ HLE VI Retrace Generator + Unmask (workaround) ═══
++  nwii::runtime::hw::pi_intmr |= 0x00000100;   // desenmascara VI siempre
++  {
++      static uint64_t last_vi_tick = 0;
++      static bool vi_init = false;
++      if (!vi_init) { last_vi_tick = ctx.inst_count; vi_init = true; }
++      const uint64_t VI_TICK_INTERVAL = 40000;
++      if (ctx.inst_count - last_vi_tick > VI_TICK_INTERVAL) {
++          last_vi_tick = ctx.inst_count;
++          nwii::runtime::hw::vi_trigger_interrupt();
++          if (std::getenv("NWII_SAMPLE")) {
++              static int vi_count = 0;
++              if (vi_count++ < 10)
++                  std::cerr << "[VI] retrace #" << vi_count
++                            << " pc=0x" << std::hex << ctx.pc << std::dec
++                            << " intmr=0x" << std::hex
++                            << nwii::runtime::hw::pi_intmr << std::dec << "\n";
++          }
++      }
++  }
++  // ═══════════════════════════════════════════════════════
+   if (ctx.dec_expired() && (ctx.msr & 0x8000) && !ctx.in_callback) {
+       ctx.dec_irq_pending = false; 
+       if (std::getenv("NWII_SAMPLE")) {
+@@ -1170,7 +1284,17 @@
+           longjmp(ctx.exception_jmp_buf, 1);
+       }
+   }
+-
++  if (std::getenv("NWII_SAMPLE")) {
++    static int ai_dbg = 0;
++    if (ai_dbg++ < 30) {
++      std::cerr << "[ActiveInts] intsr=0x" << std::hex
++                << nwii::runtime::hw::pi_intsr
++                << " intmr=0x" << nwii::runtime::hw::pi_intmr
++                << " msr=0x" << ctx.msr
++                << " in_cb=" << std::dec << ctx.in_callback
++                << " pc=0x" << std::hex << ctx.pc << std::dec << "\n";
++    }
++  }
+   uint32_t active_ints = nwii::runtime::hw::pi_intsr & nwii::runtime::hw::pi_intmr;
+ 
+   
+@@ -1203,6 +1327,24 @@
+ 
+       
+       bool idle = (ctx.mmu.read32(0x800000E4) == 0);
++      // --- INICIO DIAGNÓSTICO Y FIX TEMPORAL ---
++            if (active_ints != 0 && std::getenv("NWII_SAMPLE")) {
++                static int route_dbg = 0;
++                if (route_dbg++ < 20) {
++                    std::cerr << "[DispRoute] new_path=" << std::dec << use_new_path
++                              << " sched_dis=" << sched_disabled
++                              << " s_addr=0x" << std::hex << nwii::runtime::Config::get().game_profile.ext_interrupt_dispatch
++                              << " h_in_flight=" << std::dec << handler_in_flight
++                              << " handler_VI=0x" << std::hex << ctx.mmu.read32(0x80003040 + 24 * 4) << "\n";
++                }
++            }
++      
++            // Bypass HLE para la interrupción VI (0x100)
++            if (active_ints & 0x0100) {
++                use_new_path = false;
++                sched_disabled = false;
++            }
++            // --- FIN DIAGNÓSTICO Y FIX TEMPORAL ---
+ 
+       
+ 
+@@ -1217,33 +1359,24 @@
+                             << sched_disabled << " in_flight=" << handler_in_flight
+                             << " pc=0x" << std::hex << ctx.pc << std::dec << "\n";
+           }
+-      } else {
+-
+-          
+-          static uint32_t s_dispatch_addr = 0xFFFFFFFF; 
++} else {
++          static uint32_t s_dispatch_addr = 0xFFFFFFFF;
+           if (s_dispatch_addr == 0xFFFFFFFF) {
+-              
+               uint32_t from_cfg = nwii::runtime::Config::get().game_profile.ext_interrupt_dispatch;
+               if (from_cfg != 0) {
+                   s_dispatch_addr = from_cfg;
+                   std::cout << "[HLE PI] __OSDispatchInterrupt from config: 0x"
+                             << std::hex << s_dispatch_addr << std::dec << "\n";
+               } else {
+-
+-                  
+                   s_dispatch_addr = 0;
+               }
+           }
++          
++         // Ignorar el dispatcher PPC si es interrupción VI
++                   uint32_t active_dispatch_addr = (active_ints & 0x0100) ? 0 : s_dispatch_addr;
++         
++                   if (active_dispatch_addr != 0) {
+ 
+-          if (s_dispatch_addr != 0) {
+-
+-              
+-
+-              
+-
+-              
+-
+-              
+ 
+               ctx.srr0 = ctx.pc;
+               ctx.srr1 = ctx.msr;
+--- a/nWiiRuntime/src/hw/hw_pi.cpp
++++ b/nWiiRuntime/src/hw/hw_pi.cpp
+@@ -45,7 +45,7 @@
+                 if (pi_intmr != val)
+                     std::cout << "[HW PI] INTMR change: 0x" << std::hex << pi_intmr
+                               << " -> 0x" << val << std::dec << std::endl;
+-                pi_intmr = val;
++                pi_intmr = val | 0x00000100; // forzar VI siempre desenmascarado (workaround)
+             }
+             if (addr == 0xCC00300C) pi_fifo_base = val;
+             if (addr == 0xCC003010) pi_fifo_end = val;

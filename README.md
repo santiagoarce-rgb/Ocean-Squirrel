@@ -32,12 +32,12 @@ The goal is the same as [Ocean Crab](https://github.com/santiagoarce-rgb/OceanCr
 > This repository contains **no** game code, assets, disc images or Nintendo/THQ binaries. You need your own legally obtained copy of the game. See [Legal](#legal).
 
 > [!NOTE]
-> For now this repository is the project's **log and documentation**. The recompiler patches and runtime changes live in a local NWiiRecomp checkout and have not been published yet. The project started as a Ghidra study of the PSP version; those notes are in [`docs/archive/`](docs/archive/).
+> This repository is the project's **log and documentation**. The recompiler and runtime changes are published as diffs against NWiiRecomp in [`patches/`](patches/), and the debugging scripts are in [`tools/`](tools/). The project started as a Ghidra study of the PSP version; those notes are in [`docs/archive/`](docs/archive/).
 
 ## Status
 
 > [!WARNING]
-> **The engine runs, but its file loader never reads the disc.** The game gets through OS, IOS, audio, DSP and Wii Remote init and starts its engine threads. Its I/O thread opens `boot.ini` and `domainUID.dir` but never reads them, so the pack-file directory stays NULL and the main thread searches garbage forever. See [Current blocker](#current-blocker-files-opened-but-never-read).
+> **The file-loading blocker is understood and a fix is waiting for a rebuild.** The game gets through OS, IOS, audio, DSP and Wii Remote init and starts its engine threads, but its loader never read the disc. The cause was a **carry-flag bug in the recompiler**: one broken status check made the loader give up on every file. The fix is in [`patches/`](patches/) and the code has been regenerated, but the 48-minute build has not run yet, so it is still unverified. See [Current blocker](#current-blocker-a-carry-flag-that-was-always-0).
 
 ```text
 Boot progress  [████████████████████████░]  ~95%
@@ -56,15 +56,15 @@ Boot progress  [█████████████████████�
 | DSP / AX microcode | ✅ | Task boots, DSP and AI-DMA interrupts fire; see [notes](#a-null-vi-handler-starved-the-dsp) |
 | Engine start | ✅ | No more null-pointer calls since the `lwarx`/`stwcx.` fix; see [notes](#an-off-by-one-byte-refcount) |
 | GX FIFO | ✅ | Parsed cleanly; so far only state, clears and EFB copies (a black loading screen), no geometry yet |
-| **File loading** | ❌ | **Blocker.** `DVDOpen` succeeds but the I/O thread never issues a read |
-| Rendering | ⏳ | Waiting on the file-loading blocker |
+| **File loading** | 🔧 | **Blocker.** Root cause found (recompiler carry bug) and fixed; waiting on a rebuild to verify |
+| Rendering | ⏳ | Waiting on file loading |
 | Input, saving | ⏳ | Not started |
 
-### Current blocker: files opened but never read
+### Current blocker: a carry flag that was always 0
 
 Function names below come from the symbol map in [ToS-Decomp-Wii](https://github.com/spongeis5/ToS-Decomp-Wii) (`config/R8IE78/symbols.txt`), which covers this exact `main.dol`.
 
-The main thread is stuck here:
+**Symptom.** The main thread hung here:
 
 ```
 main → System::Game::Run → Step → zMainOGModule::UpdateGameApp → zMainInit
@@ -72,20 +72,28 @@ main → System::Game::Run → Step → zMainOGModule::UpdateGameApp → zMainIn
     → Loader::Directory::FindEntry   (count read as 0x52384945 = "R8IE")
 ```
 
-`FindEntry` is handed a **NULL directory**. The runtime maps address 0 onto `0x80000000`, so the entry count becomes the game ID `"R8IE"` (about 1.38 billion) and the search never ends. On hardware this would crash instead.
+`FindEntry` was handed a **NULL directory**. The runtime maps address 0 onto `0x80000000`, so the entry count became the game ID `"R8IE"` (about 1.38 billion) and the search never ended. `DVDOpen` succeeded for `./boot.ini` and `./domainUID.dir`, but `/dev/di` never received a single read command (`0x71`).
 
-The directory is NULL because nothing was ever read from the disc:
+**Chase.** Watching the `Loader::WholeFile` state word with `NWII_WATCH` showed what the loader did with each file: 1 (open) → 2 (wait) → **7 (error)** → 8 (done), never reaching 3 (read). That came straight after state 2's status check, `Loader::CheckIsOk`:
 
-- `/dev/di` only ever receives `0x86` (clear cover interrupt) and `0x12` (inquiry), never `0x71` (read).
-- The FST in memory (`0x817FEC40`, `0x13A0` bytes) is byte-identical to `fst.bin`, and `DVDOpen` succeeds for `./boot.ini`, `./domainUID.dir` and `./sb09.ini` (correct start and length in the `DVDFileInfo`).
-- The I/O thread `IO::MediaThreadLFS` receives the open commands, runs `OpenNewJob` → `ProcessBuckets` → `IO::DVDWrap::Open`, then waits on its command queue again. `IO::DVDWrap::Read` / `DVDReadAsyncPrio` are never called.
+```asm
+addi   r3, r3, -2      # status - 2
+addic  r0, r3, -1      # CA = (status - 2) != 0
+subfe  r3, r0, r3      # r3 = CA   →   returns (status != 2)
+```
+
+This is a standard compiler idiom for `x != 0` that depends on the carry bit (`XER.CA`) set by `addic`. The recompiler added the immediate as a **sign-extended 64-bit value**, so `x + 0xFFFFFFFFFFFFFFFF` never carried past bit 32 and CA was **always 0**. `CheckIsOk` returned "not OK" for every file, `BootStrapper::BootStrap` dropped `boot.ini` and `domainUID.dir`, and the directory stayed NULL.
+
+The bug was not limited to this function. The game has **3,102** `addic` sites with a negative immediate. On top of that, `subfic` (1,591 sites) never set CA at all, and neither did `sraw`.
+
+**Fix** (in [`patches/`](patches/)): add the immediate as a 32-bit unsigned value, so `addic rD, rA, -1` carries exactly when `rA != 0`. `subfic` now computes CA as `~rA + imm + 1 > 0xFFFFFFFF`, and `sraw` sets CA when a negative value loses 1 bits. `output.cpp` has been regenerated; it now needs a full rebuild (~48 min) to confirm the game reads the disc.
 
 The GX side is fine: a decoder run over a 334 KB FIFO dump consumed every byte cleanly and found only state setup, clears and ~2,400 EFB copies, which is what a black loading screen looks like.
 
 **Next steps**
 
-1. Disassemble `IO::MediaThreadLFS::ProcessBuckets` and find the condition that decides whether an opened job gets a read.
-2. Find who should send the read command for `domainUID.dir`, and what the main thread waits on (or fails to wait on) before calling `PackFilePath`.
+1. Rebuild and check that `[DI] Read` appears in the log and that GX starts drawing primitives.
+2. Audit the other instructions that set carry or compare against signed immediates (`addze`, `addme`, `subfze`, `cmpli`, `mulli`, …). So far every odd hang has come from the recompiler.
 3. Make null-pointer reads fault instead of returning low memory, so bugs like this crash where they start.
 
 ## How it works
@@ -127,11 +135,13 @@ Extract your disc so you have a directory with `sys/` (containing `main.dol` and
 > [!TIP]
 > Dolphin's *Extract Entire Disc* puts the game partition under `DATA/`. Point the runner (and `input_game_dir`) at that `DATA/` folder, otherwise the game cannot find `boot.ini` and its other data files.
 
-### 2. Build NWiiRecomp
+### 2. Build NWiiRecomp with the Ocean Squirrel patches
 
 ```bash
 git clone https://github.com/BlackLineInteractive/NWiiRecomp.git
 cd NWiiRecomp
+git checkout 595f176
+git apply /path/to/Ocean-Squirrel/patches/nwiirecomp/*.diff
 cmake -B build
 cmake --build build -j"$(nproc)"
 ```
@@ -151,6 +161,8 @@ runtime_source_dir = "nWiiRuntime"
 
 ```bash
 ./build/nWiiRecomp/nwiirecomp recomp_config.toml
+cp /path/to/Ocean-Squirrel/patches/nwiirecomp/hle_shims.cpp build/recompiled/
+# add hle_shims.cpp to add_executable(...) in build/recompiled/CMakeLists.txt
 
 cd build/recompiled
 cmake -B build -DCMAKE_BUILD_TYPE=Release -DSDL_PIPEWIRE=OFF -DCMAKE_POLICY_VERSION_MINIMUM=3.5
@@ -180,6 +192,10 @@ NWII_FORCE_WPAD_READY=1 ./build/SpongeBobTruthOrSquare "/path/to/extracted/game/
 | `NWII_NULLDUMP=1` | On a call through a null pointer, dump registers, the object and the stack's return addresses |
 | `NWII_WATCH=0xADDR` | Report every change of one guest word, with the PC nearby |
 | `NWII_R13WATCH=1` | Report changes of the small-data base register `r13` |
+| `NWII_STACKSAMPLE=1` | Add the return-address chain to each `NWII_SAMPLE` sample |
+| `NWII_TRACE_CALLS=1 NWII_TRACE_ONLY=a,b` | Trace only these function entries (hex); add `NWII_TRACE_STR=1` to print `r3` as a string |
+| `NWII_GXDUMP=<file>` | Save the raw bytes written to the GX FIFO (decode with [`tools/gxdecode.py`](tools/gxdecode.py)) |
+| `NWII_FIFOTRACE=1` | Report when the CPU FIFO is redirected (display lists) |
 | `SDL_VIDEODRIVER=x11` | Force X11 under Wayland |
 </details>
 
@@ -300,7 +316,7 @@ The proper fix is a Bluetooth (`oh1`) HLE that completes those requests.
 
 | Phase | | Goal |
 |---|:---:|---|
-| **Bring-up** | 🚧 | Done: recompile, native build, Wii OS / IOS / DI / ES boot, SDL2 + OpenGL context, IRQ 27. Left: **file loading** ← current, first frame in the EFB, title screen, menus, gameplay |
+| **Bring-up** | 🚧 | Done: recompile, native build, Wii OS / IOS / DI / ES boot, SDL2 + OpenGL context, IRQ 27. Left: **file loading** ← current (fix pending rebuild), first frame in the EFB, title screen, menus, gameplay |
 | 1 · Correctness | 🔭 | Bluetooth / Wii Remote HLE (replaces the IOS workaround), audio (AI/DSP), saving, upstream the paired-singles and runtime patches |
 | 2 · Understanding | 🔭 | Symbol map and game structures, sharing what was already learned in [Ocean Crab](https://github.com/santiagoarce-rgb/OceanCrab) (same game, different port) |
 | 3 · Enhancements | 🔭 | In-game options menu, high resolution, widescreen, 60 FPS |
@@ -308,7 +324,7 @@ The proper fix is a Bluetooth (`oh1`) HLE that completes those requests.
 
 ## Contributing
 
-Help is very welcome, especially with **the I/O thread that never reads** (`IO::MediaThreadLFS::ProcessBuckets`), IOS Bluetooth HLE, and GX rendering once frames start flowing. Read [`CONTRIBUTING.md`](CONTRIBUTING.md) first. It covers the commit style and the rule about never committing generated code or game data.
+Help is very welcome, especially with **auditing the recompiler's carry and compare instructions**, IOS Bluetooth HLE, and GX rendering once frames start flowing. Read [`CONTRIBUTING.md`](CONTRIBUTING.md) first. It covers the commit style and the rule about never committing generated code or game data.
 
 General-purpose fixes to the recompiler and runtime are intended to go back upstream to [NWiiRecomp](https://github.com/BlackLineInteractive/NWiiRecomp).
 
@@ -334,4 +350,4 @@ Ocean Squirrel stands on the shoulders of:
 
 ## License
 
-Documentation in this repository: [MIT](LICENSE). NWiiRecomp ships under its own license; see its repository.
+Documentation and [`tools/`](tools/) in this repository: [MIT](LICENSE). The diffs in [`patches/`](patches/) modify NWiiRecomp and fall under **NWiiRecomp's own license** (non-commercial, attribution to Volodymyr Vovchok / BlackLine Interactive); see its repository.
